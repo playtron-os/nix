@@ -7,14 +7,13 @@ use crate::Result;
 
 /// This is a wrapper around `libc::pollfd`.
 ///
-/// It's meant to be used as an argument to the [`poll`](fn.poll.html) and
-/// [`ppoll`](fn.ppoll.html) functions to specify the events of interest
-/// for a specific file descriptor.
+/// It's meant to be used as an argument to the [`poll`] and `ppoll` functions
+/// to specify the events of interest for a specific file descriptor.
 ///
-/// After a call to `poll` or `ppoll`, the events that occurred can be
-/// retrieved by calling [`revents()`](#method.revents) on the `PollFd`.
+/// After a call to `poll` or `ppoll`, the events that occurred can be retrieved by calling
+/// [`revents()`](#method.revents) on the `PollFd` object from the array passed to `poll`.
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct PollFd<'fd> {
     pollfd: libc::pollfd,
     _fd: std::marker::PhantomData<BorrowedFd<'fd>>,
@@ -33,11 +32,8 @@ impl<'fd> PollFd<'fd> {
     /// # };
     /// let (r, w) = pipe().unwrap();
     /// let pfd = PollFd::new(r.as_fd(), PollFlags::POLLIN);
-    /// let mut fds = [pfd];
-    /// poll(&mut fds, PollTimeout::NONE).unwrap();
-    /// let mut buf = [0u8; 80];
-    /// read(&r, &mut buf[..]);
     /// ```
+    /// These are placed in an array and passed to [`poll`] or `ppoll`.
     // Unlike I/O functions, constructors like this must take `BorrowedFd`
     // instead of AsFd or &AsFd.  Otherwise, an `OwnedFd` argument would be
     // dropped at the end of the method, leaving the structure referencing a
@@ -61,32 +57,32 @@ impl<'fd> PollFd<'fd> {
 
     /// Returns the events that occurred in the last call to `poll` or `ppoll`.  Will only return
     /// `None` if the kernel provides status flags that Nix does not know about.
-    pub fn revents(self) -> Option<PollFlags> {
+    pub fn revents(&self) -> Option<PollFlags> {
         PollFlags::from_bits(self.pollfd.revents)
     }
 
-    /// Returns if any of the events of interest occured in the last call to `poll` or `ppoll`. Will
+    /// Returns if any of the events of interest occurred in the last call to `poll` or `ppoll`. Will
     /// only return `None` if the kernel provides status flags that Nix does not know about.
     ///
     /// Equivalent to `x.revents()? != PollFlags::empty()`.
     ///
     /// This is marginally more efficient than [`PollFd::all`].
-    pub fn any(self) -> Option<bool> {
+    pub fn any(&self) -> Option<bool> {
         Some(self.revents()? != PollFlags::empty())
     }
 
-    /// Returns if all the events of interest occured in the last call to `poll` or `ppoll`. Will
+    /// Returns if all the events of interest occurred in the last call to `poll` or `ppoll`. Will
     /// only return `None` if the kernel provides status flags that Nix does not know about.
     ///
     /// Equivalent to `x.revents()? & x.events() == x.events()`.
     ///
     /// This is marginally less efficient than [`PollFd::any`].
-    pub fn all(self) -> Option<bool> {
+    pub fn all(&self) -> Option<bool> {
         Some(self.revents()? & self.events() == self.events())
     }
 
     /// The events of interest for this `PollFd`.
-    pub fn events(self) -> PollFlags {
+    pub fn events(&self) -> PollFlags {
         PollFlags::from_bits(self.pollfd.events).unwrap()
     }
 
@@ -179,7 +175,7 @@ libc_bitflags! {
 /// `poll` waits for one of a set of file descriptors to become ready to perform I/O.
 /// ([`poll(2)`](https://pubs.opengroup.org/onlinepubs/9699919799/functions/poll.html))
 ///
-/// `fds` contains all [`PollFd`](struct.PollFd.html) to poll.
+/// `fds` contains all [`PollFd`] to poll.
 /// The function will return as soon as any event occur for any of these `PollFd`s.
 ///
 /// The `timeout` argument specifies the number of milliseconds that `poll()`
@@ -196,6 +192,34 @@ libc_bitflags! {
 /// in timeout means an infinite timeout.  Specifying a timeout of
 /// [`PollTimeout::ZERO`] causes `poll()` to return immediately, even if no file
 /// descriptors are ready.
+///
+/// The return value contains the number of `fds` which have selected events ([`PollFd::revents`]).
+///
+/// # Examples
+/// ```no_run
+/// # use std::os::unix::io::{AsFd, AsRawFd, FromRawFd};
+/// # use nix::{
+/// #     poll::{PollTimeout, PollFd, PollFlags, poll},
+/// #     unistd::{pipe, read}
+/// # };
+/// let (r0, w0) = pipe().unwrap();
+/// let (r1, w1) = pipe().unwrap();
+///
+/// let mut pollfds = [
+///     PollFd::new(r0.as_fd(), PollFlags::POLLIN),
+///     PollFd::new(r1.as_fd(), PollFlags::POLLIN),
+/// ];
+///
+/// let nready = poll(&mut pollfds, PollTimeout::NONE).unwrap();
+/// assert!(nready >= 1);  // Since there is no timeout
+///
+/// let mut buf = [0u8; 80];
+/// if pollfds[0].any().unwrap_or_default() {
+///     read(&r0, &mut buf[..]);
+/// } else if pollfds[1].any().unwrap_or_default() {
+///     read(&r1, &mut buf[..]);
+/// }
+/// ```
 pub fn poll<T: Into<PollTimeout>>(
     fds: &mut [PollFd],
     timeout: T,
@@ -217,7 +241,7 @@ feature! {
 /// descriptor becomes ready or until a signal is caught.
 /// ([`poll(2)`](https://man7.org/linux/man-pages/man2/poll.2.html))
 ///
-/// `ppoll` behaves like `poll`, but let you specify what signals may interrupt it
+/// `ppoll` behaves like [`poll`], but let you specify what signals may interrupt it
 /// with the `sigmask` argument. If you want `ppoll` to block indefinitely,
 /// specify `None` as `timeout` (it is like `timeout = -1` for `poll`).
 /// If `sigmask` is `None`, then no signal mask manipulation is performed,

@@ -43,7 +43,8 @@ pub use self::addr::{AddressFamily, UnixAddr};
     solarish,
     target_os = "haiku",
     target_os = "hurd",
-    target_os = "redox"
+    target_os = "redox",
+    target_os = "cygwin",
 )))]
 #[cfg(feature = "net")]
 pub use self::addr::{LinkAddr, SockaddrIn, SockaddrIn6};
@@ -51,7 +52,8 @@ pub use self::addr::{LinkAddr, SockaddrIn, SockaddrIn6};
     solarish,
     target_os = "haiku",
     target_os = "hurd",
-    target_os = "redox"
+    target_os = "redox",
+    target_os = "cygwin",
 ))]
 #[cfg(feature = "net")]
 pub use self::addr::{SockaddrIn, SockaddrIn6};
@@ -60,7 +62,7 @@ pub use self::addr::{SockaddrIn, SockaddrIn6};
 pub use crate::sys::socket::addr::alg::AlgAddr;
 #[cfg(linux_android)]
 pub use crate::sys::socket::addr::netlink::NetlinkAddr;
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
 #[cfg(feature = "ioctl")]
 pub use crate::sys::socket::addr::sys_control::SysControlAddr;
 #[cfg(any(linux_android, apple_targets))]
@@ -121,8 +123,7 @@ impl TryFrom<i32> for SockType {
     }
 }
 
-/// Constants used in [`socket`](fn.socket.html) and [`socketpair`](fn.socketpair.html)
-/// to specify the protocol to use.
+/// Constants used in [`socket`] and [`socketpair`] to specify the protocol to use.
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
@@ -135,7 +136,7 @@ pub enum SockProtocol {
     Raw = libc::IPPROTO_RAW,
     /// Allows applications to configure and control a KEXT
     /// ([ref](https://developer.apple.com/library/content/documentation/Darwin/Conceptual/NKEConceptual/control/control.html))
-    #[cfg(apple_targets)]
+    #[cfg(target_os = "macos")]
     KextControl = libc::SYSPROTO_CONTROL,
     /// Receives routing and link updates and may be used to modify the routing tables (both IPv4 and IPv6), IP addresses, link
     // parameters, neighbor setups, queueing disciplines, traffic classes and packet classifiers
@@ -699,7 +700,7 @@ impl<S> RecvMsg<'_, '_, S> {
     /// Iterate over the valid control messages pointed to by this msghdr. If
     /// allocated space for CMSGs was too small it is not safe to iterate,
     /// instead return an `Error::ENOBUFS` error.
-    pub fn cmsgs(&self) -> Result<CmsgIterator> {
+    pub fn cmsgs(&self) -> Result<CmsgIterator<'_>> {
 
         if self.mhdr.msg_flags & MSG_CTRUNC == MSG_CTRUNC {
             return Err(Errno::ENOBUFS);
@@ -770,7 +771,9 @@ pub enum ControlMessageOwned {
     ///
     /// # Examples
     ///
-    /// ```
+#[cfg_attr(all(target_env = "musl", target_pointer_width = "32"), doc = "See <https://github.com/nix-rust/nix/issues/2698> for notes regarding 32-bit musl")]
+#[cfg_attr(all(target_env = "musl", target_pointer_width = "32"), doc = "```no_run")]
+#[cfg_attr(any(not(target_env = "musl"), target_pointer_width = "64"), doc="```")]
     /// # #[macro_use] extern crate nix;
     /// # use nix::sys::socket::*;
     /// # use nix::sys::time::*;
@@ -910,7 +913,7 @@ pub enum ControlMessageOwned {
     ///
     /// `UdpGroSegment` socket option should be enabled on a socket
     /// to allow receiving GRO packets.
-    #[cfg(target_os = "linux")]
+    #[cfg(linux_android)]
     #[cfg(feature = "net")]
     #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
     UdpGroSegments(i32),
@@ -925,6 +928,19 @@ pub enum ControlMessageOwned {
     /// to allow receiving the drop counter.
     #[cfg(any(linux_android, target_os = "fuchsia"))]
     RxqOvfl(u32),
+
+    /// The kernel-set `skb->mark` (i.e. the value `SO_MARK` writes on
+    /// outgoing packets, or that nftables / tc set via `meta mark`) of a
+    /// received packet, delivered as a `(SOL_SOCKET, SO_MARK)` ancillary
+    /// message.
+    ///
+    /// To receive this cmsg the socket must have the `SO_RCVMARK`
+    /// socket option enabled (Linux 5.19+; older kernels return
+    /// `ENOPROTOOPT` from `setsockopt`). Unlike the send-side `SO_MARK`,
+    /// `SO_RCVMARK` is unprivileged: any process may read marks set by
+    /// privileged components elsewhere on the system.
+    #[cfg(target_os = "linux")]
+    SoMark(u32),
 
     /// Socket error queue control messages read with the `MSG_ERRQUEUE` flag.
     #[cfg(linux_android)]
@@ -1023,7 +1039,7 @@ impl ControlMessageOwned {
                 let cred: libc::cmsgcred = unsafe { ptr::read_unaligned(p as *const _) };
                 ControlMessageOwned::ScmCreds(cred.into())
             }
-            #[cfg(not(any(target_os = "aix", target_os = "haiku")))]
+            #[cfg(not(any(target_os = "aix", target_os = "haiku", target_os = "cygwin")))]
             (libc::SOL_SOCKET, libc::SCM_TIMESTAMP) => {
                 let tv: libc::timeval = unsafe { ptr::read_unaligned(p as *const _) };
                 ControlMessageOwned::ScmTimestamp(TimeVal::from(tv))
@@ -1085,7 +1101,7 @@ impl ControlMessageOwned {
                 let dl = unsafe { ptr::read_unaligned(p as *const libc::sockaddr_in) };
                 ControlMessageOwned::Ipv4OrigDstAddr(dl)
             },
-            #[cfg(target_os = "linux")]
+            #[cfg(linux_android)]
             #[cfg(feature = "net")]
             (libc::SOL_UDP, libc::UDP_GRO) => {
                 let gso_size: i32 = unsafe { ptr::read_unaligned(p as *const _) };
@@ -1095,6 +1111,11 @@ impl ControlMessageOwned {
             (libc::SOL_SOCKET, libc::SO_RXQ_OVFL) => {
                 let drop_counter = unsafe { ptr::read_unaligned(p as *const u32) };
                 ControlMessageOwned::RxqOvfl(drop_counter)
+            },
+            #[cfg(target_os = "linux")]
+            (libc::SOL_SOCKET, libc::SO_MARK) => {
+                let mark = unsafe { ptr::read_unaligned(p as *const u32) };
+                ControlMessageOwned::SoMark(mark)
             },
             #[cfg(linux_android)]
             #[cfg(feature = "net")]
@@ -1108,7 +1129,10 @@ impl ControlMessageOwned {
                 let (err, addr) = unsafe { Self::recv_err_helper::<sockaddr_in6>(p, len) };
                 ControlMessageOwned::Ipv6RecvErr(err, addr)
             },
-            #[cfg(any(linux_android, target_os = "freebsd"))]
+            #[cfg(any(
+                all(linux_android, not(target_env = "uclibc")),
+                target_os = "freebsd"
+            ))]
             #[cfg(feature = "net")]
             (libc::IPPROTO_IPV6, libc::IPV6_ORIGDSTADDR) => {
                 let dl = unsafe { ptr::read_unaligned(p as *const libc::sockaddr_in6) };
@@ -1263,7 +1287,7 @@ pub enum ControlMessage<'a> {
     /// passed through this control message.
     /// Send buffer should consist of multiple fixed-size wire payloads
     /// following one by one, and the last, possibly smaller one.
-    #[cfg(target_os = "linux")]
+    #[cfg(linux_android)]
     #[cfg(feature = "net")]
     #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
     UdpGsoSegments(&'a u16),
@@ -1372,13 +1396,15 @@ impl ControlMessage<'_> {
     /// The value of CMSG_LEN on this message.
     /// Safe because CMSG_LEN is always safe
     #[cfg(any(target_os = "android",
-              all(target_os = "linux", not(any(target_env = "musl", target_env = "ohos")))))]
+              all(target_os = "linux", not(any(target_env = "musl", target_env = "ohos"))),
+              target_os = "cygwin"))]
     fn cmsg_len(&self) -> usize {
         unsafe{CMSG_LEN(self.len() as libc::c_uint) as usize}
     }
 
     #[cfg(not(any(target_os = "android",
-              all(target_os = "linux", not(any(target_env = "musl", target_env = "ohos"))))))]
+              all(target_os = "linux", not(any(target_env = "musl", target_env = "ohos"))),
+              target_os = "cygwin")))]
     fn cmsg_len(&self) -> libc::c_uint {
         unsafe{CMSG_LEN(self.len() as libc::c_uint)}
     }
@@ -1433,7 +1459,7 @@ impl ControlMessage<'_> {
             ControlMessage::AlgSetAeadAssoclen(len) => {
                 len as *const _ as *const u8
             },
-            #[cfg(target_os = "linux")]
+            #[cfg(linux_android)]
             #[cfg(feature = "net")]
             ControlMessage::UdpGsoSegments(gso_size) => {
                 gso_size as *const _ as *const u8
@@ -1511,7 +1537,7 @@ impl ControlMessage<'_> {
             ControlMessage::AlgSetAeadAssoclen(len) => {
                 mem::size_of_val(len)
             },
-            #[cfg(target_os = "linux")]
+            #[cfg(linux_android)]
             #[cfg(feature = "net")]
             ControlMessage::UdpGsoSegments(gso_size) => {
                 mem::size_of_val(gso_size)
@@ -1568,7 +1594,7 @@ impl ControlMessage<'_> {
             #[cfg(linux_android)]
             ControlMessage::AlgSetIv(_) | ControlMessage::AlgSetOp(_) |
                 ControlMessage::AlgSetAeadAssoclen(_) => libc::SOL_ALG,
-            #[cfg(target_os = "linux")]
+            #[cfg(linux_android)]
             #[cfg(feature = "net")]
             ControlMessage::UdpGsoSegments(_) => libc::SOL_UDP,
             #[cfg(any(linux_android, target_os = "netbsd", apple_targets))]
@@ -1620,7 +1646,7 @@ impl ControlMessage<'_> {
             ControlMessage::AlgSetAeadAssoclen(_) => {
                 libc::ALG_SET_AEAD_ASSOCLEN
             },
-            #[cfg(target_os = "linux")]
+            #[cfg(linux_android)]
             #[cfg(feature = "net")]
             ControlMessage::UdpGsoSegments(_) => {
                 libc::UDP_SEGMENT
@@ -1735,7 +1761,7 @@ pub fn sendmsg<S>(fd: RawFd, iov: &[IoSlice<'_>], cmsgs: &[ControlMessage],
 }
 
 
-/// An extension of `sendmsg` that allows the caller to transmit multiple
+/// An extension of [`sendmsg`] that allows the caller to transmit multiple
 /// messages on a socket using a single system call. This has performance
 /// benefits for some applications.
 ///
@@ -1749,9 +1775,6 @@ pub fn sendmsg<S>(fd: RawFd, iov: &[IoSlice<'_>], cmsgs: &[ControlMessage],
 ///
 /// # Returns
 /// `Vec` with numbers of sent bytes on each sent message.
-///
-/// # References
-/// [`sendmsg`](fn.sendmsg.html)
 #[cfg(any(linux_android, target_os = "freebsd", target_os = "netbsd"))]
 pub fn sendmmsg<'a, XS, AS, C, I, S>(
     fd: RawFd,
@@ -2331,10 +2354,10 @@ pub fn bind(fd: RawFd, addr: &dyn SockaddrLike) -> Result<()> {
 /// Accept a connection on a socket
 ///
 /// [Further reading](https://pubs.opengroup.org/onlinepubs/9699919799/functions/accept.html)
-pub fn accept(sockfd: RawFd) -> Result<RawFd> {
-    let res = unsafe { libc::accept(sockfd, ptr::null_mut(), ptr::null_mut()) };
+pub fn accept<Fd: AsFd>(sockfd: Fd) -> Result<OwnedFd> {
+    let res = unsafe { libc::accept(sockfd.as_fd().as_raw_fd(), ptr::null_mut(), ptr::null_mut()) };
 
-    Errno::result(res)
+    Errno::result(res).map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Accept a connection on a socket
@@ -2356,12 +2379,12 @@ pub fn accept(sockfd: RawFd) -> Result<RawFd> {
     solarish,
     target_os = "linux",
 ))]
-pub fn accept4(sockfd: RawFd, flags: SockFlag) -> Result<RawFd> {
+pub fn accept4<Fd: AsFd>(sockfd: Fd, flags: SockFlag) -> Result<OwnedFd> {
     let res = unsafe {
-        libc::accept4(sockfd, ptr::null_mut(), ptr::null_mut(), flags.bits())
+        libc::accept4(sockfd.as_fd().as_raw_fd(), ptr::null_mut(), ptr::null_mut(), flags.bits())
     };
 
-    Errno::result(res)
+    Errno::result(res).map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// Initiate a connection on a socket
@@ -2466,7 +2489,7 @@ pub trait GetSockOpt: Copy {
 
 /// Represents a socket option that can be set.
 pub trait SetSockOpt: Clone {
-    type Val;
+    type Val: ?Sized;
 
     /// Set the value of this socket option on the given socket.
     fn set<F: AsFd>(&self, fd: &F, val: &Self::Val) -> Result<()>;

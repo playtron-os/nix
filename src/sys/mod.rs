@@ -39,7 +39,9 @@ feature! {
     linux_android,
     solarish,
     target_os = "fuchsia",
+    target_os = "haiku",
     target_os = "redox",
+    target_os = "cygwin",
 ))]
 #[cfg(feature = "ioctl")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ioctl")))]
@@ -52,7 +54,6 @@ feature! {
     pub mod memfd;
 }
 
-#[cfg(not(target_os = "redox"))]
 feature! {
     #![feature = "mman"]
     pub mod mman;
@@ -64,7 +65,7 @@ feature! {
     pub mod personality;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(linux_android)]
 feature! {
     #![feature = "process"]
     pub mod prctl;
@@ -97,7 +98,7 @@ feature! {
 #[cfg(not(any(
     target_os = "redox",
     target_os = "fuchsia",
-    solarish,
+    target_os = "solaris",
     target_os = "haiku"
 )))]
 feature! {
@@ -137,7 +138,13 @@ feature! {
     pub mod stat;
 }
 
-#[cfg(any(linux_android, freebsdlike, apple_targets, target_os = "openbsd"))]
+#[cfg(any(
+    linux_android,
+    freebsdlike,
+    apple_targets,
+    target_os = "openbsd",
+    target_os = "cygwin"
+))]
 feature! {
     #![feature = "fs"]
     pub mod statfs;
@@ -182,7 +189,7 @@ feature! {
     pub mod inotify;
 }
 
-#[cfg(linux_android)]
+#[cfg(any(linux_android, target_os = "freebsd"))]
 feature! {
     #![feature = "time"]
     pub mod timerfd;

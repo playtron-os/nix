@@ -128,7 +128,8 @@ libc_bitflags!(
         #[cfg(not(any(
             solarish,
             target_os = "aix",
-            target_os = "haiku"
+            target_os = "haiku",
+            target_os = "cygwin"
         )))]
         O_ASYNC;
         /// Closes the file descriptor once an `execve` call is made.
@@ -173,7 +174,7 @@ libc_bitflags!(
         #[cfg(not(target_os = "redox"))]
         O_NOCTTY;
         /// Same as `O_NONBLOCK`.
-        #[cfg(not(any(target_os = "redox", target_os = "haiku")))]
+        #[cfg(not(any(target_os = "redox", target_os = "haiku", target_os = "cygwin")))]
         O_NDELAY;
         /// `open()` will fail if the given path is a symbolic link.
         O_NOFOLLOW;
@@ -744,7 +745,7 @@ pub enum FcntlArg<'a> {
     F_SETFL(OFlag), // O_NONBLOCK
     /// Set or clear a file segment lock
     F_SETLK(&'a libc::flock),
-    /// Like [`F_SETLK`](FcntlArg::F_SETLK) except that if a shared or exclusive lock is blocked by
+    /// Like [`F_SETLK`] except that if a shared or exclusive lock is blocked by
     /// other locks, the process waits until the request can be satisfied.
     F_SETLKW(&'a libc::flock),
     /// Get the first lock that blocks the lock description
@@ -752,7 +753,7 @@ pub enum FcntlArg<'a> {
     /// Acquire or release an open file description lock
     #[cfg(linux_android)]
     F_OFD_SETLK(&'a libc::flock),
-    /// Like [`F_OFD_SETLK`](FcntlArg::F_OFD_SETLK) except that if a conflicting lock is held on
+    /// Like [`F_OFD_SETLK`] except that if a conflicting lock is held on
     /// the file, then wait for that lock to be released.
     #[cfg(linux_android)]
     F_OFD_SETLKW(&'a libc::flock),
@@ -1037,6 +1038,7 @@ pub unsafe trait Flockable: std::os::fd::AsRawFd {}
 pub struct Flock<T: Flockable>(T);
 
 #[cfg(not(any(target_os = "redox", target_os = "solaris")))]
+#[allow(clippy::unnecessary_unwrap)] // https://github.com/rust-lang/rust-clippy/issues/15744
 impl<T: Flockable> Drop for Flock<T> {
     fn drop(&mut self) {
         let res = Errno::result(unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) });
@@ -1173,16 +1175,20 @@ libc_bitflags! {
         /// Request that pages be moved instead of copied.
         ///
         /// Not applicable to `vmsplice`.
+        #[cfg(not(target_env = "uclibc"))]
         SPLICE_F_MOVE;
         /// Do not block on I/O.
+        #[cfg(not(target_env = "uclibc"))]
         SPLICE_F_NONBLOCK;
         /// Hint that more data will be coming in a subsequent splice.
         ///
         /// Not applicable to `vmsplice`.
+        #[cfg(not(target_env = "uclibc"))]
         SPLICE_F_MORE;
         /// Gift the user pages to the kernel.
         ///
         /// Not applicable to `splice`.
+        #[cfg(not(target_env = "uclibc"))]
         SPLICE_F_GIFT;
     }
 }
@@ -1307,8 +1313,17 @@ pub fn tee<Fd1: std::os::fd::AsFd, Fd2: std::os::fd::AsFd>(
 ///
 /// # See Also
 /// *[`vmsplice`](https://man7.org/linux/man-pages/man2/vmsplice.2.html)
+///
+/// # Safety
+///
+/// * The content of `iov` must not be changed until kernel has finished reading it "even after the caller process finished".
+/// * If `SpliceFFlags::SPLICE_F_GIFT` is set:
+///   - The contents of `iov` must never be modified after the call.
+///   - All pointers in `iov` must be page-aligned.
+///   - All lengths must be a multiple of the system page size in bytes.
+/// **Note** Linux kernel does not have an API to know when the kernel finished using the content of RAM
 #[cfg(linux_android)]
-pub fn vmsplice<F: std::os::fd::AsFd>(
+pub unsafe fn vmsplice<F: std::os::fd::AsFd>(
     fd: F,
     iov: &[std::io::IoSlice<'_>],
     flags: SpliceFFlags,

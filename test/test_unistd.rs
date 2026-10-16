@@ -260,6 +260,19 @@ mod linux_android {
     }
 }
 
+#[cfg(target_os = "freebsd")]
+mod freebsd {
+    use nix::unistd::pthread_getthreadid_np;
+
+    #[test]
+    fn test_pthread_getthreadid_np() {
+        let tid: ::libc::pid_t = pthread_getthreadid_np().into();
+        // FreeBSD has thread id namespace shared with pids, the split
+        // is at PID_MAX = 99999.
+        assert!(tid >= 100000);
+    }
+}
+
 #[test]
 // `getgroups()` and `setgroups()` do not behave as expected on Apple platforms
 #[cfg(not(any(
@@ -631,7 +644,8 @@ cfg_if! {
 #[cfg(not(any(
     target_os = "redox",
     target_os = "fuchsia",
-    target_os = "haiku"
+    target_os = "haiku",
+    target_os = "cygwin"
 )))]
 fn test_acct() {
     use std::process::Command;
@@ -707,7 +721,12 @@ fn test_sysconf_unsupported() {
     assert!(open_max.expect("sysconf failed").is_none())
 }
 
-#[cfg(any(linux_android, freebsdlike, target_os = "openbsd"))]
+#[cfg(any(
+    linux_android,
+    freebsdlike,
+    target_os = "openbsd",
+    target_os = "redox"
+))]
 #[test]
 fn test_getresuid() {
     let resuids = getresuid().unwrap();
@@ -716,7 +735,12 @@ fn test_getresuid() {
     assert_ne!(resuids.saved.as_raw(), libc::uid_t::MAX);
 }
 
-#[cfg(any(linux_android, freebsdlike, target_os = "openbsd"))]
+#[cfg(any(
+    linux_android,
+    freebsdlike,
+    target_os = "openbsd",
+    target_os = "redox"
+))]
 #[test]
 fn test_getresgid() {
     let resgids = getresgid().unwrap();
@@ -1222,12 +1246,16 @@ fn test_access_file_exists() {
 #[cfg(not(target_os = "redox"))]
 #[test]
 fn test_user_into_passwd() {
-    // get the UID of the "nobody" user
-    #[cfg(not(target_os = "haiku"))]
-    let test_username = "nobody";
-    // "nobody" unavailable on haiku
-    #[cfg(target_os = "haiku")]
-    let test_username = "user";
+    let test_username = if cfg!(target_os = "haiku") {
+        // "nobody" unavailable on haiku
+        "user"
+    } else if cfg!(target_os = "cygwin") {
+        // the Windows admin user
+        "Administrator"
+    } else {
+        // get the UID of the "nobody" user
+        "nobody"
+    };
 
     let nobody = User::from_name(test_username).unwrap().unwrap();
     let pwd: libc::passwd = nobody.into();

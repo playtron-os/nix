@@ -111,7 +111,7 @@ libc_enum! {
         #[cfg(not(any(linux_android, target_os = "emscripten",
                       target_os = "fuchsia", target_os = "redox",
                       target_os = "haiku", target_os = "aix",
-                      target_os = "solaris")))]
+                      target_os = "solaris", target_os = "cygwin")))]
         /// Information request
         SIGINFO,
     }
@@ -190,7 +190,8 @@ impl FromStr for Signal {
                 target_os = "redox",
                 target_os = "aix",
                 target_os = "haiku",
-                target_os = "solaris"
+                target_os = "solaris",
+                target_os = "cygwin"
             )))]
             "SIGINFO" => Signal::SIGINFO,
             _ => return Err(Errno::EINVAL),
@@ -275,7 +276,8 @@ impl Signal {
                 target_os = "redox",
                 target_os = "aix",
                 target_os = "haiku",
-                target_os = "solaris"
+                target_os = "solaris",
+                target_os = "cygwin"
             )))]
             Signal::SIGINFO => "SIGINFO",
         }
@@ -359,7 +361,7 @@ const SIGNALS: [Signal; 30] = [
     SIGURG, SIGPOLL, SIGIO, SIGSTOP, SIGTSTP, SIGCONT, SIGTTIN, SIGTTOU,
     SIGVTALRM, SIGPROF, SIGXCPU, SIGXFSZ, SIGTRAP,
 ];
-#[cfg(target_os = "solaris")]
+#[cfg(any(target_os = "solaris", target_os = "cygwin"))]
 #[cfg(feature = "signal")]
 const SIGNALS: [Signal; 30] = [
     SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL,
@@ -374,7 +376,8 @@ const SIGNALS: [Signal; 30] = [
     target_os = "aix",
     target_os = "redox",
     target_os = "haiku",
-    target_os = "solaris"
+    target_os = "solaris",
+    target_os = "cygwin"
 )))]
 #[cfg(feature = "signal")]
 const SIGNALS: [Signal; 31] = [
@@ -423,9 +426,7 @@ pub const SIGPOLL : Signal = SIGIO;
 pub const SIGUNUSED : Signal = SIGSYS;
 
 cfg_if! {
-    if #[cfg(target_os = "redox")] {
-        type SaFlags_t = libc::c_ulong;
-    } else if #[cfg(target_env = "uclibc")] {
+    if #[cfg(target_env = "uclibc")] {
         type SaFlags_t = libc::c_ulong;
     } else {
         type SaFlags_t = libc::c_int;
@@ -749,8 +750,38 @@ impl<'a> IntoIterator for &'a SigSet {
     }
 }
 
-/// A signal handler.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// A signal handler used with [`sigaction`] or [`signal`].
+///
+/// Signal handlers have very limited functionality.  A signal handler must
+/// only call async-signal-safe functions.  A list of async-signal-safe
+/// functions can be found in
+/// [signal-safety(7)](https://man7.org/linux/man-pages/man7/signal-safety.7.html).
+///
+/// In particular, signal handlers should only set a flag using an atomic type
+/// (such as [`std::sync::atomic::AtomicBool`]) and do nothing else.  Any more
+/// complex logic should be performed outside the signal handler.
+///
+/// # Examples
+///
+/// Catch `SIGINT` and record it with an atomic flag:
+///
+/// ```no_run
+/// # use std::convert::TryFrom;
+/// # use std::sync::atomic::{AtomicBool, Ordering};
+/// # use nix::sys::signal::{self, Signal, SigHandler};
+/// static SIGNALED: AtomicBool = AtomicBool::new(false);
+///
+/// extern "C" fn handle_sigint(signal: libc::c_int) {
+///     let signal = Signal::try_from(signal).unwrap();
+///     SIGNALED.store(signal == Signal::SIGINT, Ordering::Relaxed);
+/// }
+///
+/// fn main() {
+///     let handler = SigHandler::Handler(handle_sigint);
+///     unsafe { signal::signal(Signal::SIGINT, handler) }.unwrap();
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, Hash)]
 pub enum SigHandler {
     /// Default signal handling.
     SigDfl,
@@ -764,7 +795,29 @@ pub enum SigHandler {
     SigAction(extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void))
 }
 
-/// Action to take on receipt of a signal. Corresponds to `sigaction`.
+/// Action to take on receipt of a signal.
+///
+/// `SigAction` wraps `libc::sigaction`, which defines the full signal
+/// disposition: the handler, flags controlling delivery behavior, and the set
+/// of signals to block while the handler runs.  Construct one with
+/// [`SigAction::new`] and install it with [`sigaction`].
+///
+/// # Examples
+///
+/// Install a handler for `SIGINT`:
+///
+/// ```no_run
+/// # use nix::sys::signal::{self, SaFlags, SigAction, SigHandler, SigSet, Signal};
+/// extern "C" fn handle_sigint(signal: libc::c_int) {
+///     // handle signal
+/// }
+///
+/// fn main() {
+///     let handler = SigHandler::Handler(handle_sigint);
+///     let action = SigAction::new(handler, SaFlags::empty(), SigSet::empty());
+///     unsafe { signal::sigaction(Signal::SIGINT, &action) }.unwrap();
+/// }
+/// ```
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SigAction {
@@ -784,7 +837,6 @@ impl SigAction {
     /// is the `SigAction` variant). `mask` specifies other signals to block during execution of
     /// the signal-catching function.
     pub fn new(handler: SigHandler, flags: SaFlags, mask: SigSet) -> SigAction {
-        #[cfg(not(target_os = "aix"))]
         unsafe fn install_sig(p: *mut libc::sigaction, handler: SigHandler) {
             unsafe {
                  (*p).sa_sigaction = match handler {
@@ -793,18 +845,6 @@ impl SigAction {
                     SigHandler::Handler(f) => f as *const extern "C" fn(libc::c_int) as usize,
                     #[cfg(not(target_os = "redox"))]
                     SigHandler::SigAction(f) => f as *const extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) as usize,
-                };
-            }
-        }
-
-        #[cfg(target_os = "aix")]
-        unsafe fn install_sig(p: *mut libc::sigaction, handler: SigHandler) {
-            unsafe {
-                (*p).sa_union.__su_sigaction = match handler {
-                    SigHandler::SigDfl => unsafe { mem::transmute::<usize, extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void)>(libc::SIG_DFL) },
-                    SigHandler::SigIgn => unsafe { mem::transmute::<usize, extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void)>(libc::SIG_IGN) },
-                    SigHandler::Handler(f) => unsafe { mem::transmute::<extern "C" fn(i32), extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void)>(f) },
-                    SigHandler::SigAction(f) => f,
                 };
             }
         }
@@ -836,7 +876,6 @@ impl SigAction {
     }
 
     /// Returns the action's handler.
-    #[cfg(not(target_os = "aix"))]
     pub fn handler(&self) -> SigHandler {
         match self.sigaction.sa_sigaction {
             libc::SIG_DFL => SigHandler::SigDfl,
@@ -867,26 +906,6 @@ impl SigAction {
                          as *const extern "C" fn(libc::c_int))
                 }
                 as extern "C" fn(libc::c_int)),
-        }
-    }
-
-    /// Returns the action's handler.
-    #[cfg(target_os = "aix")]
-    pub fn handler(&self) -> SigHandler {
-        unsafe {
-        match self.sigaction.sa_union.__su_sigaction as usize {
-            libc::SIG_DFL => SigHandler::SigDfl,
-            libc::SIG_IGN => SigHandler::SigIgn,
-            p if self.flags().contains(SaFlags::SA_SIGINFO) =>
-                SigHandler::SigAction(
-                    *(&p as *const usize
-                         as *const extern "C" fn(_, _, _))
-                as extern "C" fn(_, _, _)),
-            p => SigHandler::Handler(
-                    *(&p as *const usize
-                         as *const extern "C" fn(libc::c_int))
-                as extern "C" fn(libc::c_int)),
-        }
         }
     }
 }
@@ -923,12 +942,12 @@ pub unsafe fn sigaction(signal: Signal, sigaction: &SigAction) -> Result<SigActi
 /// Installs `handler` for the given `signal`, returning the previous signal
 /// handler. `signal` should only be used following another call to `signal` or
 /// if the current handler is the default. The return value of `signal` is
-/// undefined after setting the handler with [`sigaction`][SigActionFn].
+/// undefined after setting the handler with [`sigaction`].
 ///
 /// # Safety
 ///
 /// If the pointer to the previous signal handler is invalid, undefined
-/// behavior could be invoked when casting it back to a [`SigAction`][SigActionStruct].
+/// behavior could be invoked when casting it back to a [`SigAction`].
 ///
 /// # Examples
 ///
@@ -960,16 +979,14 @@ pub unsafe fn sigaction(signal: Signal, sigaction: &SigAction) -> Result<SigActi
 ///
 /// # Errors
 ///
-/// Returns [`Error(Errno::EOPNOTSUPP)`] if `handler` is
-/// [`SigAction`][SigActionStruct]. Use [`sigaction`][SigActionFn] instead.
+/// Returns [`Error(Errno::EOPNOTSUPP)`](Errno::EOPNOTSUPP) if `handler` is
+/// [`SigAction`]. Use [`sigaction`] instead.
 ///
 /// `signal` also returns any error from `libc::signal`, such as when an attempt
 /// is made to catch a signal that cannot be caught or to ignore a signal that
 /// cannot be ignored.
 ///
 /// [`Error::UnsupportedOperation`]: ../../enum.Error.html#variant.UnsupportedOperation
-/// [SigActionStruct]: struct.SigAction.html
-/// [sigactionFn]: fn.sigaction.html
 pub unsafe fn signal(signal: Signal, handler: SigHandler) -> Result<SigHandler> {
     let signal = signal as libc::c_int;
     let res = match handler {
@@ -1066,7 +1083,7 @@ pub fn sigprocmask(how: SigmaskHow, set: Option<&SigSet>, oldset: Option<&mut Si
 ///   - If less than `-1`, the signal is sent to all processes whose
 ///     process group ID is equal to the absolute value of `pid`.
 /// * `signal` - Signal to send. If `None`, error checking is performed
-///              but no signal is actually sent.
+///   but no signal is actually sent.
 ///
 /// See Also
 /// [`kill(2)`](https://pubs.opengroup.org/onlinepubs/9699919799/functions/kill.html)

@@ -1,17 +1,18 @@
 //! Socket options as used by `setsockopt` and `getsockopt`.
-#[cfg(linux_android)]
+#[cfg(any(linux_android, target_os = "illumos"))]
 use super::SetSockOpt;
 use crate::sys::time::TimeVal;
-#[cfg(linux_android)]
+#[cfg(any(linux_android, target_os = "illumos"))]
 use crate::{errno::Errno, Result};
 use cfg_if::cfg_if;
 use libc::{self, c_int, c_void, socklen_t};
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
 use std::ffi::CString;
 use std::ffi::{CStr, OsStr, OsString};
 use std::mem::{self, MaybeUninit};
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
-#[cfg(linux_android)]
+#[cfg(any(linux_android, target_os = "illumos"))]
 use std::os::unix::io::{AsFd, AsRawFd};
 
 // Constants
@@ -192,6 +193,12 @@ macro_rules! sockopt_impl {
                       $name, GetOnly, $level, $flag, usize, $crate::sys::socket::sockopt::GetUsize);
     };
 
+    ($(#[$attr:meta])* $name:ident, GetOnly, $level:expr, $flag:path, OwnedFd) =>
+    {
+        sockopt_impl!($(#[$attr])*
+                      $name, GetOnly, $level, $flag, OwnedFd, $crate::sys::socket::sockopt::GetOwnedFd);
+    };
+
     ($(#[$attr:meta])* $name:ident, SetOnly, $level:expr, $flag:path, bool) => {
         sockopt_impl!($(#[$attr])*
                       $name, SetOnly, $level, $flag, bool, $crate::sys::socket::sockopt::SetBool);
@@ -207,6 +214,12 @@ macro_rules! sockopt_impl {
                       $name, SetOnly, $level, $flag, usize, $crate::sys::socket::sockopt::SetUsize);
     };
 
+    ($(#[$attr:meta])* $name:ident, SetOnly, $level:expr, $flag:path, OwnedFd) =>
+    {
+        sockopt_impl!($(#[$attr])*
+                      $name, SetOnly, $level, $flag, OwnedFd, $crate::sys::socket::sockopt::SetOwnedFd);
+    };
+
     ($(#[$attr:meta])* $name:ident, Both, $level:expr, $flag:path, bool) => {
         sockopt_impl!($(#[$attr])*
                       $name, Both, $level, $flag, bool, $crate::sys::socket::sockopt::GetBool, $crate::sys::socket::sockopt::SetBool);
@@ -220,6 +233,11 @@ macro_rules! sockopt_impl {
     ($(#[$attr:meta])* $name:ident, Both, $level:expr, $flag:path, usize) => {
         sockopt_impl!($(#[$attr])*
                       $name, Both, $level, $flag, usize, $crate::sys::socket::sockopt::GetUsize, $crate::sys::socket::sockopt::SetUsize);
+    };
+
+    ($(#[$attr:meta])* $name:ident, Both, $level:expr, $flag:path, OwnedFd) => {
+        sockopt_impl!($(#[$attr])*
+                      $name, Both, $level, $flag, OwnedFd, $crate::sys::socket::sockopt::GetOwnedFd, $crate::sys::socket::sockopt::SetOwnedFd);
     };
 
     ($(#[$attr:meta])* $name:ident, Both, $level:expr, $flag:path,
@@ -298,7 +316,7 @@ sockopt_impl!(
     libc::SO_REUSEADDR,
     bool
 );
-#[cfg(not(solarish))]
+#[cfg(not(any(solarish, target_os = "cygwin")))]
 sockopt_impl!(
     /// Permits multiple AF_INET or AF_INET6 sockets to be bound to an
     /// identical socket address.
@@ -545,6 +563,7 @@ sockopt_impl!(
 );
 #[cfg(linux_android)]
 #[cfg(feature = "net")]
+#[cfg(not(target_env = "uclibc"))]
 sockopt_impl!(
     #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
     /// If enabled, the kernel will not reserve an ephemeral port when binding
@@ -662,6 +681,15 @@ sockopt_impl!(
     libc::SO_PEERCRED,
     super::UnixCredentials
 );
+#[cfg(target_os = "linux")]
+sockopt_impl!(
+    /// Return the pidfd of the foreign process connected to this socket.
+    PeerPidfd,
+    GetOnly,
+    libc::SOL_SOCKET,
+    libc::SO_PEERPIDFD,
+    OwnedFd
+);
 #[cfg(target_os = "freebsd")]
 #[cfg(feature = "net")]
 sockopt_impl!(
@@ -698,7 +726,7 @@ sockopt_impl!(
     u32
 );
 cfg_if! {
-    if #[cfg(linux_android)] {
+    if #[cfg(any(linux_android, apple_targets))] {
         sockopt_impl!(
             /// The maximum segment size for outgoing TCP packets.
             TcpMaxSeg, Both, libc::IPPROTO_TCP, libc::TCP_MAXSEG, u32);
@@ -883,7 +911,8 @@ sockopt_impl!(
     target_os = "aix",
     target_os = "haiku",
     target_os = "hurd",
-    target_os = "redox"
+    target_os = "redox",
+    target_os = "cygwin"
 )))]
 sockopt_impl!(
     /// Enable or disable the receiving of the `SO_TIMESTAMP` control message.
@@ -1092,7 +1121,7 @@ sockopt_impl!(
     libc::IP_ORIGDSTADDR,
     bool
 );
-#[cfg(target_os = "linux")]
+#[cfg(linux_android)]
 #[cfg(feature = "net")]
 sockopt_impl!(
     #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
@@ -1104,7 +1133,7 @@ sockopt_impl!(
     libc::UDP_SEGMENT,
     libc::c_int
 );
-#[cfg(target_os = "linux")]
+#[cfg(linux_android)]
 #[cfg(feature = "net")]
 sockopt_impl!(
     #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
@@ -1136,6 +1165,23 @@ sockopt_impl!(
     libc::SOL_SOCKET,
     libc::SO_RXQ_OVFL,
     libc::c_int
+);
+#[cfg(target_os = "linux")]
+sockopt_impl!(
+    /// Enable delivery of the kernel-set `skb->mark` of received packets as a
+    /// `(SOL_SOCKET, SO_MARK)` ancillary message (decoded by nix as
+    /// [`ControlMessageOwned::SoMark`](super::ControlMessageOwned::SoMark)).
+    ///
+    /// Available since Linux 5.19; older kernels return `ENOPROTOOPT` from
+    /// `setsockopt`. Unlike the send-side [`Mark`] option (which sets
+    /// `skb->mark` on outgoing packets and requires `CAP_NET_ADMIN`),
+    /// `SO_RCVMARK` is unprivileged: any process may observe marks that
+    /// privileged components elsewhere on the system have set.
+    RcvMark,
+    Both,
+    libc::SOL_SOCKET,
+    libc::SO_RCVMARK,
+    bool
 );
 #[cfg(feature = "net")]
 sockopt_impl!(
@@ -1215,7 +1261,10 @@ sockopt_impl!(
     libc::IPV6_RECVHOPLIMIT,
     bool
 );
-#[cfg(any(linux_android, target_os = "freebsd"))]
+#[cfg(any(
+    all(linux_android, not(target_env = "uclibc")),
+    target_os = "freebsd"
+))]
 #[cfg(feature = "net")]
 sockopt_impl!(
     #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
@@ -1236,7 +1285,10 @@ sockopt_impl!(
     libc::IP_DONTFRAG,
     bool
 );
-#[cfg(any(linux_android, apple_targets))]
+#[cfg(any(
+    all(linux_android, not(target_env = "uclibc")),
+    apple_targets
+))]
 sockopt_impl!(
     /// Set "don't fragment packet" flag on the IPv6 packet.
     Ipv6DontFrag,
@@ -1245,7 +1297,7 @@ sockopt_impl!(
     libc::IPV6_DONTFRAG,
     bool
 );
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
 #[cfg(feature = "net")]
 sockopt_impl!(
     /// Get the utun interface name.
@@ -1266,6 +1318,28 @@ sockopt_impl!(
     Both,
     libc::SOL_SOCKET,
     libc::SO_EXCLBIND,
+    bool
+);
+#[cfg(target_os = "linux")]
+sockopt_impl!(
+    /// To be used with `ReusePort`,
+    /// we can then attach a BPF (classic)
+    /// to set how the packets are assigned
+    /// to the socket (e.g. cpu distribution).
+    AttachReusePortCbpf,
+    SetOnly,
+    libc::SOL_SOCKET,
+    libc::SO_ATTACH_REUSEPORT_CBPF,
+    libc::sock_fprog
+);
+#[cfg(target_os = "linux")]
+sockopt_impl!(
+    /// Enable/disable TCP corking. If enabled all queued partial frames are
+    /// sent when the option is cleared again.
+    TcpCork,
+    Both,
+    libc::IPPROTO_TCP,
+    libc::TCP_CORK,
     bool
 );
 
@@ -1482,6 +1556,58 @@ impl SetSockOpt for TcpTlsRx {
     }
 }
 
+#[cfg(target_os = "illumos")]
+#[derive(Copy, Clone, Debug)]
+/// Attach a named filter to this socket to be able to
+/// defer when anough byte had been buffered by the kernel
+pub struct FilterAttach;
+
+#[cfg(target_os = "illumos")]
+impl SetSockOpt for FilterAttach {
+    type Val = OsStr;
+
+    fn set<F: AsFd>(&self, fd: &F, val: &Self::Val) -> Result<()> {
+        if val.len() > libc::FILNAME_MAX as usize {
+            return Err(Errno::EINVAL);
+        }
+        unsafe {
+            let res = libc::setsockopt(
+                fd.as_fd().as_raw_fd(),
+                libc::SOL_FILTER,
+                libc::FIL_ATTACH,
+                val.as_bytes().as_ptr().cast(),
+                val.len() as libc::socklen_t,
+            );
+            Errno::result(res).map(drop)
+        }
+    }
+}
+
+#[cfg(target_os = "illumos")]
+#[derive(Copy, Clone, Debug)]
+/// Detach a socket filter previously attached with FIL_ATTACH
+pub struct FilterDetach;
+
+#[cfg(target_os = "illumos")]
+impl SetSockOpt for FilterDetach {
+    type Val = OsStr;
+
+    fn set<F: AsFd>(&self, fd: &F, val: &Self::Val) -> Result<()> {
+        if val.len() > libc::FILNAME_MAX as usize {
+            return Err(Errno::EINVAL);
+        }
+        unsafe {
+            let res = libc::setsockopt(
+                fd.as_fd().as_raw_fd(),
+                libc::SOL_FILTER,
+                libc::FIL_DETACH,
+                val.as_bytes().as_ptr().cast(),
+                val.len() as libc::socklen_t,
+            );
+            Errno::result(res).map(drop)
+        }
+    }
+}
 /*
  *
  * ===== Accessor helpers =====
@@ -1751,6 +1877,68 @@ impl<'a> Set<'a, usize> for SetUsize {
     }
 }
 
+
+/// Getter for a `OwnedFd` value.
+// Hide the docs, because it's an implementation detail of `sockopt_impl!`
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct GetOwnedFd {
+    len: socklen_t,
+    val: MaybeUninit<c_int>,
+}
+
+impl Get<OwnedFd> for GetOwnedFd {
+    fn uninit() -> Self {
+        GetOwnedFd {
+            len: mem::size_of::<c_int>() as socklen_t,
+            val: MaybeUninit::uninit(),
+        }
+    }
+
+    fn ffi_ptr(&mut self) -> *mut c_void {
+        self.val.as_mut_ptr().cast()
+    }
+
+    fn ffi_len(&mut self) -> *mut socklen_t {
+        &mut self.len
+    }
+
+    unsafe fn assume_init(self) -> OwnedFd {
+        use std::os::fd::{FromRawFd, RawFd};
+
+        assert_eq!(
+            self.len as usize,
+            mem::size_of::<c_int>(),
+            "invalid getsockopt implementation"
+        );
+        unsafe { OwnedFd::from_raw_fd(self.val.assume_init() as RawFd) }
+    }
+}
+
+/// Setter for an `OwnedFd` value.
+// Hide the docs, because it's an implementation detail of `sockopt_impl!`
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SetOwnedFd {
+    val: c_int,
+}
+
+impl<'a> Set<'a, OwnedFd> for SetOwnedFd {
+    fn new(val: &'a OwnedFd) -> SetOwnedFd {
+        use std::os::fd::AsRawFd;
+
+        SetOwnedFd { val: val.as_raw_fd() as c_int }
+    }
+
+    fn ffi_ptr(&self) -> *const c_void {
+        &self.val as *const c_int as *const c_void
+    }
+
+    fn ffi_len(&self) -> socklen_t {
+        mem::size_of_val(&self.val) as socklen_t
+    }
+}
+
 /// Getter for a `OsString` value.
 // Hide the docs, because it's an implementation detail of `sockopt_impl!`
 #[doc(hidden)]
@@ -1799,9 +1987,9 @@ pub struct SetOsString<'a> {
     val: &'a OsStr,
 }
 
-#[cfg(any(target_os = "freebsd", linux_android))]
+#[cfg(any(target_os = "freebsd", linux_android, target_os = "illumos"))]
 impl<'a> Set<'a, OsString> for SetOsString<'a> {
-    fn new(val: &OsString) -> SetOsString {
+    fn new(val: &OsString) -> SetOsString<'_> {
         SetOsString {
             val: val.as_os_str(),
         }
@@ -1817,13 +2005,15 @@ impl<'a> Set<'a, OsString> for SetOsString<'a> {
 }
 
 /// Getter for a `CString` value.
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
+#[cfg(feature = "net")]
 struct GetCString<T: AsMut<[u8]>> {
     len: socklen_t,
     val: MaybeUninit<T>,
 }
 
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
+#[cfg(feature = "net")]
 impl<T: AsMut<[u8]>> Get<CString> for GetCString<T> {
     fn uninit() -> Self {
         GetCString {

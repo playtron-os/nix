@@ -16,7 +16,7 @@ use crate::errno::Errno;
 use crate::sys::socket::addr::alg::AlgAddr;
 #[cfg(linux_android)]
 use crate::sys::socket::addr::netlink::NetlinkAddr;
-#[cfg(all(feature = "ioctl", apple_targets))]
+#[cfg(all(feature = "ioctl", target_os = "macos"))]
 use crate::sys::socket::addr::sys_control::SysControlAddr;
 use crate::{NixPath, Result};
 use cfg_if::cfg_if;
@@ -66,7 +66,7 @@ pub enum AddressFamily {
     #[cfg(linux_android)]
     Netlink = libc::AF_NETLINK,
     /// Kernel interface for interacting with the routing table
-    #[cfg(not(any(linux_android, target_os = "redox")))]
+    #[cfg(not(any(linux_android, target_os = "redox", target_os = "cygwin")))]
     Route = libc::PF_ROUTE,
     /// Low level packet interface (see [`packet(7)`](https://man7.org/linux/man-pages/man7/packet.7.html))
     #[cfg(any(linux_android, solarish, target_os = "fuchsia"))]
@@ -78,7 +78,7 @@ pub enum AddressFamily {
     #[cfg(linux_android)]
     Ax25 = libc::AF_AX25,
     /// IPX - Novell protocols
-    #[cfg(not(any(target_os = "aix", target_os = "redox")))]
+    #[cfg(not(any(target_os = "aix", target_os = "redox", target_os = "cygwin")))]
     Ipx = libc::AF_IPX,
     /// AppleTalk
     #[cfg(not(target_os = "redox"))]
@@ -164,6 +164,7 @@ pub enum AddressFamily {
         apple_targets,
         target_os = "hurd",
         target_os = "redox",
+        target_os = "cygwin",
     )))]
     Bluetooth = libc::AF_BLUETOOTH,
     /// IUCV (inter-user communication vehicle) z/VM protocol for
@@ -180,6 +181,7 @@ pub enum AddressFamily {
         target_os = "haiku",
         target_os = "hurd",
         target_os = "redox",
+        target_os = "cygwin",
     )))]
     Isdn = libc::AF_ISDN,
     /// Nokia cellular modem IPC/RPC interface
@@ -263,7 +265,7 @@ impl AddressFamily {
             libc::AF_NETLINK => Some(AddressFamily::Netlink),
             #[cfg(apple_targets)]
             libc::AF_SYSTEM => Some(AddressFamily::System),
-            #[cfg(not(any(linux_android, target_os = "redox")))]
+            #[cfg(not(any(linux_android, target_os = "redox", target_os = "cygwin")))]
             libc::PF_ROUTE => Some(AddressFamily::Route),
             #[cfg(linux_android)]
             libc::AF_PACKET => Some(AddressFamily::Packet),
@@ -446,6 +448,7 @@ impl UnixAddr {
                      target_os = "fuchsia",
                      solarish,
                      target_os = "redox",
+                     target_os = "cygwin",
                 ))]
             {
                 UnixAddr { sun, sun_len }
@@ -510,6 +513,7 @@ impl UnixAddr {
                      target_os = "fuchsia",
                      solarish,
                      target_os = "redox",
+                     target_os = "cygwin",
                 ))]
             {
                 self.sun_len
@@ -526,7 +530,8 @@ impl SockaddrLike for UnixAddr {
         linux_android,
         target_os = "fuchsia",
         solarish,
-        target_os = "redox"
+        target_os = "redox",
+        target_os = "cygwin",
     ))]
     fn len(&self) -> libc::socklen_t {
         self.sun_len.into()
@@ -556,6 +561,7 @@ impl SockaddrLike for UnixAddr {
                          target_os = "fuchsia",
                          solarish,
                          target_os = "redox",
+                         target_os = "cygwin",
                 ))] {
                 let su_len = len.unwrap_or(
                     mem::size_of::<libc::sockaddr_un>() as libc::socklen_t
@@ -1122,13 +1128,13 @@ pub union SockaddrStorage {
     alg: AlgAddr,
     #[cfg(all(
         feature = "net",
-        not(any(target_os = "hurd", target_os = "redox"))
+        not(any(target_os = "hurd", target_os = "redox", target_os = "cygwin"))
     ))]
     #[cfg_attr(docsrs, doc(cfg(feature = "net")))]
     dl: LinkAddr,
     #[cfg(linux_android)]
     nl: NetlinkAddr,
-    #[cfg(all(feature = "ioctl", apple_targets))]
+    #[cfg(all(feature = "ioctl", target_os = "macos"))]
     #[cfg_attr(docsrs, doc(cfg(feature = "ioctl")))]
     sctl: SysControlAddr,
     #[cfg(feature = "net")]
@@ -1166,6 +1172,7 @@ impl SockaddrLike for SockaddrStorage {
                     linux_android,
                     target_os = "fuchsia",
                     solarish,
+                    target_os = "cygwin",
                 ))]
                 if i32::from(ss.ss_family) == libc::AF_UNIX {
                     // Safe because we UnixAddr is strictly smaller than
@@ -1209,7 +1216,7 @@ impl SockaddrLike for SockaddrStorage {
                 libc::AF_PACKET => unsafe {
                     LinkAddr::from_raw(addr, l).map(|dl| Self { dl })
                 },
-                #[cfg(all(feature = "ioctl", apple_targets))]
+                #[cfg(all(feature = "ioctl", target_os = "macos"))]
                 libc::AF_SYSTEM => unsafe {
                     SysControlAddr::from_raw(addr, l).map(|sctl| Self { sctl })
                 },
@@ -1222,7 +1229,7 @@ impl SockaddrLike for SockaddrStorage {
         }
     }
 
-    #[cfg(any(linux_android, target_os = "fuchsia", solarish))]
+    #[cfg(any(linux_android, target_os = "fuchsia", solarish, target_os = "cygwin"))]
     fn len(&self) -> libc::socklen_t {
         match self.as_unix_addr() {
             // The UnixAddr type knows its own length
@@ -1284,6 +1291,7 @@ impl SockaddrStorage {
             if #[cfg(any(linux_android,
                      target_os = "fuchsia",
                      solarish,
+                     target_os = "cygwin",
                 ))]
             {
                 let p = unsafe{ &self.ss as *const libc::sockaddr_storage };
@@ -1313,6 +1321,7 @@ impl SockaddrStorage {
             if #[cfg(any(linux_android,
                      target_os = "fuchsia",
                      solarish,
+                     target_os = "cygwin",
                 ))]
             {
                 let p = unsafe{ &self.ss as *const libc::sockaddr_storage };
@@ -1366,7 +1375,7 @@ impl SockaddrStorage {
     accessors! {as_netlink_addr, as_netlink_addr_mut, NetlinkAddr,
     AddressFamily::Netlink, libc::sockaddr_nl, nl}
 
-    #[cfg(all(feature = "ioctl", apple_targets))]
+    #[cfg(all(feature = "ioctl", target_os = "macos"))]
     #[cfg_attr(docsrs, doc(cfg(feature = "ioctl")))]
     accessors! {as_sys_control_addr, as_sys_control_addr_mut, SysControlAddr,
     AddressFamily::System, libc::sockaddr_ctl, sctl}
@@ -1404,7 +1413,7 @@ impl fmt::Display for SockaddrStorage {
                 #[cfg(any(linux_android, target_os = "fuchsia"))]
                 #[cfg(feature = "net")]
                 libc::AF_PACKET => self.dl.fmt(f),
-                #[cfg(apple_targets)]
+                #[cfg(target_os = "macos")]
                 #[cfg(feature = "ioctl")]
                 libc::AF_SYSTEM => self.sctl.fmt(f),
                 libc::AF_UNIX => self.su.fmt(f),
@@ -1466,7 +1475,7 @@ impl Hash for SockaddrStorage {
                 #[cfg(any(linux_android, target_os = "fuchsia"))]
                 #[cfg(feature = "net")]
                 libc::AF_PACKET => self.dl.hash(s),
-                #[cfg(apple_targets)]
+                #[cfg(target_os = "macos")]
                 #[cfg(feature = "ioctl")]
                 libc::AF_SYSTEM => self.sctl.hash(s),
                 libc::AF_UNIX => self.su.hash(s),
@@ -1496,7 +1505,7 @@ impl PartialEq for SockaddrStorage {
                 #[cfg(any(linux_android, target_os = "fuchsia"))]
                 #[cfg(feature = "net")]
                 (libc::AF_PACKET, libc::AF_PACKET) => self.dl == other.dl,
-                #[cfg(apple_targets)]
+                #[cfg(target_os = "macos")]
                 #[cfg(feature = "ioctl")]
                 (libc::AF_SYSTEM, libc::AF_SYSTEM) => self.sctl == other.sctl,
                 (libc::AF_UNIX, libc::AF_UNIX) => self.su == other.su,
@@ -1718,7 +1727,7 @@ pub mod alg {
 
 feature! {
 #![feature = "ioctl"]
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
 pub mod sys_control {
     use crate::sys::socket::addr::AddressFamily;
     use libc::{self, c_uchar};
@@ -2188,7 +2197,7 @@ mod tests {
         }
     }
 
-    #[cfg(not(any(target_os = "hurd", target_os = "redox")))]
+    #[cfg(not(any(target_os = "hurd", target_os = "redox", target_os = "cygwin")))]
     #[allow(clippy::cast_ptr_alignment)]
     mod link {
         #[cfg(any(apple_targets, solarish))]
@@ -2419,7 +2428,7 @@ mod tests {
             let addr = UnixAddr::new_abstract(name.as_bytes()).unwrap();
 
             let sun_path1 =
-                unsafe { &(*addr.as_ptr()).sun_path[..addr.path_len()] };
+                unsafe { &(&(*addr.as_ptr()).sun_path)[..addr.path_len()] };
             let sun_path2 = [
                 0, 110, 105, 120, 0, 97, 98, 115, 116, 114, 97, 99, 116, 0,
                 116, 101, 115, 116,

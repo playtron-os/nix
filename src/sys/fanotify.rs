@@ -356,7 +356,7 @@ pub struct FanotifyPidfdRecord(libc::fanotify_event_info_pidfd);
 impl FanotifyPidfdRecord {
     /// The process file descriptor that refers to the process responsible for
     /// generating this event. If the underlying pidfd_create fails, `None` is returned.
-    pub fn pidfd(&self) -> Option<BorrowedFd> {
+    pub fn pidfd(&self) -> Option<BorrowedFd<'_>> {
         if self.0.pidfd == libc::FAN_NOPIDFD || self.0.pidfd == libc::FAN_EPIDFD
         {
             None
@@ -439,8 +439,8 @@ impl FanotifyEvent {
 
     /// The file descriptor of the event. If the value is `None` when reading
     /// from the fanotify group, this event is to notify that a group queue
-    /// overflow occured.
-    pub fn fd(&self) -> Option<BorrowedFd> {
+    /// overflow occurred.
+    pub fn fd(&self) -> Option<BorrowedFd<'_>> {
         if self.0.fd == libc::FAN_NOFD {
             None
         } else {

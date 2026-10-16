@@ -1,7 +1,7 @@
 //! Get filesystem statistics, non-portably
 //!
 //! See [`statvfs`](crate::sys::statvfs) for a portable alternative.
-#[cfg(not(linux_android))]
+#[cfg(not(any(linux_android, target_os = "cygwin")))]
 use std::ffi::CStr;
 use std::fmt::{self, Debug};
 use std::mem;
@@ -19,8 +19,11 @@ use crate::{errno::Errno, NixPath, Result};
 #[cfg(target_os = "android")]
 pub type fsid_t = libc::__fsid_t;
 /// Identifies a mounted file system
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "cygwin")))]
 pub type fsid_t = libc::fsid_t;
+/// Identifies a mounted file system
+#[cfg(target_os = "cygwin")]
+pub type fsid_t = libc::c_long;
 
 cfg_if! {
     if #[cfg(any(linux_android, target_os = "fuchsia"))] {
@@ -53,11 +56,10 @@ type fs_type_t = u32;
 type fs_type_t = libc::c_ulong;
 #[cfg(all(
     target_os = "linux",
-    target_arch = "s390x",
-    not(target_env = "musl")
+    target_arch = "s390x"
 ))]
 type fs_type_t = libc::c_uint;
-#[cfg(all(target_os = "linux", any(target_env = "musl", target_env = "ohos")))]
+#[cfg(all(target_os = "linux", any(target_env = "musl", target_env = "ohos"), not(target_arch = "s390x")))]
 type fs_type_t = libc::c_ulong;
 #[cfg(all(target_os = "linux", target_env = "uclibc"))]
 type fs_type_t = libc::c_int;
@@ -71,6 +73,8 @@ type fs_type_t = libc::c_int;
     ))
 ))]
 type fs_type_t = libc::__fsword_t;
+#[cfg(target_os = "cygwin")]
+type fs_type_t = libc::c_long;
 
 /// Describes the file system type as known by the operating system.
 #[cfg(any(
@@ -83,6 +87,7 @@ type fs_type_t = libc::__fsword_t;
         target_os = "linux",
         not(any(target_arch = "s390x", target_env = "musl"))
     ),
+    target_os = "cygwin",
 ))]
 #[derive(Eq, Copy, Clone, PartialEq, Debug)]
 pub struct FsType(pub fs_type_t);
@@ -301,7 +306,7 @@ impl Statfs {
     }
 
     /// Magic code defining system type
-    #[cfg(not(linux_android))]
+    #[cfg(not(any(linux_android, target_os = "cygwin")))]
     pub fn filesystem_type_name(&self) -> &str {
         let c_str = unsafe { CStr::from_ptr(self.0.f_fstypename.as_ptr()) };
         c_str.to_str().unwrap()
@@ -322,8 +327,7 @@ impl Statfs {
     /// Optimal transfer block size
     #[cfg(all(
         target_os = "linux",
-        target_arch = "s390x",
-        not(target_env = "musl")
+        target_arch = "s390x"
     ))]
     pub fn optimal_transfer_size(&self) -> u32 {
         self.0.f_bsize
@@ -332,7 +336,7 @@ impl Statfs {
     /// Optimal transfer block size
     #[cfg(any(
         target_os = "android",
-        all(target_os = "linux", target_env = "musl"),
+        all(target_os = "linux", target_env = "musl", not(target_arch = "s390x")),
         all(target_os = "linux", target_env = "ohos")
     ))]
     pub fn optimal_transfer_size(&self) -> libc::c_ulong {
@@ -381,8 +385,7 @@ impl Statfs {
     // f_bsize on linux: https://github.com/torvalds/linux/blob/master/fs/nfs/super.c#L471
     #[cfg(all(
         target_os = "linux",
-        target_arch = "s390x",
-        not(target_env = "musl")
+        target_arch = "s390x"
     ))]
     pub fn block_size(&self) -> u32 {
         self.0.f_bsize
@@ -390,7 +393,7 @@ impl Statfs {
 
     /// Size of a block
     // f_bsize on linux: https://github.com/torvalds/linux/blob/master/fs/nfs/super.c#L471
-    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    #[cfg(all(target_os = "linux", target_env = "musl", not(target_arch = "s390x")))]
     pub fn block_size(&self) -> libc::c_ulong {
         self.0.f_bsize
     }
@@ -437,7 +440,7 @@ impl Statfs {
     }
 
     /// Size of a block
-    #[cfg(target_os = "dragonfly")]
+    #[cfg(any(target_os = "dragonfly", target_os = "cygwin"))]
     pub fn block_size(&self) -> libc::c_long {
         self.0.f_bsize
     }
@@ -466,15 +469,14 @@ impl Statfs {
     /// Maximum length of filenames
     #[cfg(all(
         target_os = "linux",
-        target_arch = "s390x",
-        not(target_env = "musl")
+        target_arch = "s390x"
     ))]
     pub fn maximum_name_length(&self) -> u32 {
         self.0.f_namelen
     }
 
     /// Maximum length of filenames
-    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    #[cfg(all(target_os = "linux", target_env = "musl", not(target_arch = "s390x")))]
     pub fn maximum_name_length(&self) -> libc::c_ulong {
         self.0.f_namelen
     }
@@ -518,7 +520,7 @@ impl Statfs {
     }
 
     /// Total data blocks in filesystem
-    #[cfg(target_os = "dragonfly")]
+    #[cfg(any(target_os = "dragonfly", target_os = "cygwin"))]
     pub fn blocks(&self) -> libc::c_long {
         self.0.f_blocks
     }
@@ -542,7 +544,7 @@ impl Statfs {
     }
 
     /// Free blocks in filesystem
-    #[cfg(target_os = "dragonfly")]
+    #[cfg(any(target_os = "dragonfly", target_os = "cygwin"))]
     pub fn blocks_free(&self) -> libc::c_long {
         self.0.f_bfree
     }
@@ -560,7 +562,7 @@ impl Statfs {
     }
 
     /// Free blocks available to unprivileged user
-    #[cfg(target_os = "dragonfly")]
+    #[cfg(any(target_os = "dragonfly", target_os = "cygwin"))]
     pub fn blocks_available(&self) -> libc::c_long {
         self.0.f_bavail
     }
@@ -590,7 +592,7 @@ impl Statfs {
     }
 
     /// Total file nodes in filesystem
-    #[cfg(target_os = "dragonfly")]
+    #[cfg(any(target_os = "dragonfly", target_os = "cygwin"))]
     pub fn files(&self) -> libc::c_long {
         self.0.f_files
     }
@@ -613,7 +615,7 @@ impl Statfs {
     }
 
     /// Free file nodes in filesystem
-    #[cfg(target_os = "dragonfly")]
+    #[cfg(any(target_os = "dragonfly", target_os = "cygwin"))]
     pub fn files_free(&self) -> libc::c_long {
         self.0.f_ffree
     }
@@ -639,6 +641,7 @@ impl Statfs {
 impl Debug for Statfs {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let mut ds = f.debug_struct("Statfs");
+        #[cfg(not(target_os = "cygwin"))]
         ds.field("optimal_transfer_size", &self.optimal_transfer_size());
         ds.field("block_size", &self.block_size());
         ds.field("blocks", &self.blocks());

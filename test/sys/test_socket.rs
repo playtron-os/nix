@@ -200,7 +200,7 @@ pub fn test_path_to_sock_addr() {
 
     let expect: &[c_char] =
         unsafe { slice::from_raw_parts(path.as_ptr().cast(), path.len()) };
-    assert_eq!(unsafe { &(*addr.as_ptr()).sun_path[..8] }, expect);
+    assert_eq!(unsafe { &(&(*addr.as_ptr()).sun_path)[..8] }, expect);
 
     assert_eq!(addr.path(), Some(actual));
 }
@@ -327,6 +327,7 @@ pub fn test_socketpair() {
 }
 
 #[test]
+#[cfg_attr(target_os = "cygwin", ignore)]
 pub fn test_recvmsg_sockaddr_un() {
     use nix::sys::socket::{
         self, bind, socket, AddressFamily, MsgFlags, SockFlag, SockType,
@@ -461,7 +462,7 @@ mod recvfrom {
         assert_eq!(AddressFamily::Inet, from.unwrap().family().unwrap());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(linux_android)]
     mod udp_offload {
         use super::*;
         use nix::sys::socket::sockopt::{UdpGroSegment, UdpGsoSegment};
@@ -841,6 +842,7 @@ pub fn test_recvmsg_ebadf() {
 // 2.12.0.  https://bugs.launchpad.net/qemu/+bug/1701808
 #[cfg_attr(qemu, ignore)]
 #[test]
+#[cfg_attr(target_os = "cygwin", ignore)]
 pub fn test_scm_rights() {
     use nix::sys::socket::{
         recvmsg, sendmsg, socketpair, AddressFamily, ControlMessage,
@@ -917,15 +919,7 @@ pub fn test_scm_rights() {
     close(received_r).unwrap();
 }
 
-// 1. Disable the test on emulated platforms due to not enabled support of
-//    AF_ALG in QEMU from rust cross
-// 2. Disable the test on aarch64/Linux CI because bind() fails with ENOENT
-//    https://github.com/nix-rust/nix/issues/1352
 #[cfg(linux_android)]
-#[cfg_attr(
-    any(qemu, all(target_os = "linux", target_arch = "aarch64")),
-    ignore
-)]
 #[test]
 pub fn test_af_alg_cipher() {
     use nix::sys::socket::sockopt::AlgSetKey;
@@ -934,10 +928,35 @@ pub fn test_af_alg_cipher() {
         ControlMessage, MsgFlags, SockFlag, SockType,
     };
     use nix::unistd::read;
+    use std::fs;
     use std::io::IoSlice;
 
     let alg_type = "skcipher";
     let alg_name = "ctr-aes-aesni";
+
+    /*
+     * Skip the test if requirements are not satisfied.
+     */
+    require_kernel_module!(test_af_alg_cipher, "af_alg");
+
+    let has_algorithm = fs::read_to_string("/proc/crypto")
+        .map(|crypto| {
+            crypto.lines().any(|line| {
+                if let Some((key, value)) = line.split_once(':') {
+                    key.trim() == "name" && value.trim() == alg_name
+                } else {
+                    false
+                }
+            })
+        })
+        .unwrap_or(false);
+    if !has_algorithm {
+        println!("AF_ALG algorithm {alg_name:?} unavailable, skipping test.");
+        return;
+    }
+
+    require_kernel_module!(test_af_alg_cipher, "algif_skcipher");
+
     // 256-bits secret key
     let key = vec![0u8; 32];
     // 16-bytes IV
@@ -962,7 +981,7 @@ pub fn test_af_alg_cipher() {
     assert_eq!(sockaddr.alg_type().to_string_lossy(), alg_type);
 
     setsockopt(&sock, AlgSetKey::default(), &key).expect("setsockopt");
-    let session_socket = accept(sock.as_raw_fd()).expect("accept failed");
+    let session_socket = accept(&sock).expect("accept failed");
 
     let msgs = [
         ControlMessage::AlgSetOp(&libc::ALG_OP_ENCRYPT),
@@ -980,12 +999,8 @@ pub fn test_af_alg_cipher() {
 
     // allocate buffer for encrypted data
     let mut encrypted = vec![0u8; payload_len];
-    // SAFETY:
-    // should be safe since session_socket won't be closed before the use of this borrowed one
-    let borrowed_session_socket =
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(session_socket) };
     let num_bytes =
-        read(borrowed_session_socket, &mut encrypted).expect("read encrypt");
+        read(&session_socket, &mut encrypted).expect("read encrypt");
     assert_eq!(num_bytes, payload_len);
 
     let iov = IoSlice::new(&encrypted);
@@ -1007,21 +1022,14 @@ pub fn test_af_alg_cipher() {
 
     // allocate buffer for decrypted data
     let mut decrypted = vec![0u8; payload_len];
-    // SAFETY:
-    // should be safe since session_socket won't be closed before the use of this borrowed one
-    let borrowed_session_socket =
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(session_socket) };
     let num_bytes =
-        read(borrowed_session_socket, &mut decrypted).expect("read decrypt");
+        read(&session_socket, &mut decrypted).expect("read decrypt");
 
     assert_eq!(num_bytes, payload_len);
     assert_eq!(decrypted, payload);
 }
 
-// Disable the test on emulated platforms due to not enabled support of AF_ALG
-// in QEMU from rust cross
 #[cfg(linux_android)]
-#[cfg_attr(qemu, ignore)]
 #[test]
 pub fn test_af_alg_aead() {
     use libc::{ALG_OP_DECRYPT, ALG_OP_ENCRYPT};
@@ -1032,18 +1040,37 @@ pub fn test_af_alg_aead() {
         ControlMessage, MsgFlags, SockFlag, SockType,
     };
     use nix::unistd::read;
+    use std::fs;
     use std::io::IoSlice;
 
-    skip_if_cirrus!("Fails for an unknown reason Cirrus CI.  Bug #1352");
-    // Travis's seccomp profile blocks AF_ALG
-    // https://docs.docker.com/engine/security/seccomp/
-    skip_if_seccomp!(test_af_alg_aead);
+    let alg_name = "gcm(aes)";
+
+    /*
+     * Skip the test if requirements are not satisfied.
+     */
+    require_kernel_module!(test_af_alg_aead, "af_alg");
+
+    let has_algorithm = fs::read_to_string("/proc/crypto")
+        .map(|crypto| {
+            crypto.lines().any(|line| {
+                if let Some((key, value)) = line.split_once(':') {
+                    key.trim() == "name" && value.trim() == alg_name
+                } else {
+                    false
+                }
+            })
+        })
+        .unwrap_or(false);
+    if !has_algorithm {
+        println!("AF_ALG algorithm {alg_name:?} unavailable, skipping test.");
+        return;
+    }
+    require_kernel_module!(test_af_alg_aead, "algif_aead");
 
     let auth_size = 4usize;
     let assoc_size = 16u32;
 
     let alg_type = "aead";
-    let alg_name = "gcm(aes)";
     // 256-bits secret key
     let key = vec![0u8; 32];
     // 12-bytes IV
@@ -1079,7 +1106,7 @@ pub fn test_af_alg_aead() {
         .expect("setsockopt AlgSetAeadAuthSize");
     setsockopt(&sock, AlgSetKey::default(), &key)
         .expect("setsockopt AlgSetKey");
-    let session_socket = accept(sock.as_raw_fd()).expect("accept failed");
+    let session_socket = accept(&sock).expect("accept failed");
 
     let msgs = [
         ControlMessage::AlgSetOp(&ALG_OP_ENCRYPT),
@@ -1100,12 +1127,8 @@ pub fn test_af_alg_aead() {
     // allocate buffer for encrypted data
     let mut encrypted =
         vec![0u8; (assoc_size as usize) + payload_len + auth_size];
-    // SAFETY:
-    // should be safe since session_socket won't be closed before the use of this borrowed one
-    let borrowed_session_socket =
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(session_socket) };
     let num_bytes =
-        read(borrowed_session_socket, &mut encrypted).expect("read encrypt");
+        read(&session_socket, &mut encrypted).expect("read encrypt");
     assert_eq!(num_bytes, payload_len + auth_size + (assoc_size as usize));
 
     for i in 0..assoc_size {
@@ -1116,7 +1139,7 @@ pub fn test_af_alg_aead() {
 
     let iv = vec![1u8; iv_len];
 
-    let session_socket = accept(sock.as_raw_fd()).expect("accept failed");
+    let session_socket = accept(&sock).expect("accept failed");
 
     let msgs = [
         ControlMessage::AlgSetOp(&ALG_OP_DECRYPT),
@@ -1140,15 +1163,10 @@ pub fn test_af_alg_aead() {
     // and in the input buffer for decryption.
     // Do not block on read, as we may have fewer bytes than buffer size
 
-    // SAFETY:
-    //
-    // `session_socket` will be valid for the lifetime of this test
-    // TODO: remove this workaround when accept(2) becomes I/O-safe.
-    let borrowed_fd =
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(session_socket) };
-    fcntl(borrowed_fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
+    fcntl(&session_socket, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
         .expect("fcntl non_blocking");
-    let num_bytes = read(borrowed_fd, &mut decrypted).expect("read decrypt");
+    let num_bytes =
+        read(&session_socket, &mut decrypted).expect("read decrypt");
 
     assert!(num_bytes >= payload_len + (assoc_size as usize));
     assert_eq!(
@@ -1327,6 +1345,7 @@ pub fn test_sendmsg_ipv4sendsrcaddr() {
 // 2.12.0.  https://bugs.launchpad.net/qemu/+bug/1701808
 #[cfg_attr(qemu, ignore)]
 #[test]
+#[cfg_attr(target_os = "cygwin", ignore)]
 fn test_scm_rights_single_cmsg_multiple_fds() {
     use nix::sys::socket::{
         recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags,
@@ -1684,11 +1703,8 @@ pub fn test_named_unixdomain() {
         write(&s2, b"hello").expect("write failed");
     });
 
-    let s3 = accept(s1.as_raw_fd()).expect("accept failed");
+    let s3 = accept(&s1).expect("accept failed");
 
-    // SAFETY:
-    // It should be safe considering that s3 will be open within this test
-    let s3 = unsafe { std::os::fd::BorrowedFd::borrow_raw(s3) };
     let mut buf = [0; 5];
     read(s3, &mut buf).unwrap();
     thr.join().unwrap();
@@ -1707,6 +1723,7 @@ pub fn test_listen_maxbacklog() {
 pub fn test_listen_wrongbacklog() {
     use nix::sys::socket::Backlog;
 
+    #[cfg(not(target_os = "cygwin"))]
     assert!(Backlog::new(libc::SOMAXCONN + 1).is_err());
     assert!(Backlog::new(-2).is_err());
 }
@@ -1760,7 +1777,7 @@ pub fn test_unnamed_unixdomain_autobind() {
 }
 
 // Test creating and using named system control sockets
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
 #[test]
 pub fn test_syscontrol() {
     use nix::errno::Errno;
@@ -2104,7 +2121,10 @@ pub fn test_recvif_ipv4() {
     }
 }
 
-#[cfg(any(linux_android, target_os = "freebsd"))]
+#[cfg(any(
+    all(linux_android, not(target_env = "uclibc")),
+    target_os = "freebsd"
+))]
 #[cfg_attr(qemu, ignore)]
 #[test]
 pub fn test_recvif_ipv6() {
@@ -2579,6 +2599,95 @@ fn test_recvmsg_rxq_ovfl() {
 
     // One packet lost.
     assert_eq!(drop_counter, 1);
+}
+
+// Verifies the round-trip for `SO_RCVMARK`: the receiver enables it via the new
+// `RcvMark` sockopt, the sender stamps a known mark on its outgoing packet via
+// the existing `Mark` sockopt, and we assert that the cmsg arrives decoded as
+// the typed `ControlMessageOwned::SoMark(u32)` variant carrying that exact
+// value (rather than falling through to `Unknown`).
+//
+// Privilege/kernel requirements:
+//   * `SO_RCVMARK` itself is unprivileged, but stamping a non-zero mark via
+//     send-side `SO_MARK` requires `CAP_NET_ADMIN` — without it the mark is
+//     silently zero and the assertion below would be vacuous. We therefore
+//     skip the whole test rather than weaken the assertion.
+//   * `SO_RCVMARK` landed in Linux 5.19 (commit `6fd1d51cfa25`). On older
+//     kernels `setsockopt` would return `ENOPROTOOPT`.
+// Disable on emulated platforms for the same reason `test_recvmsg_rxq_ovfl`
+// does: lack of QEMU support is suspected.
+#[cfg_attr(qemu, ignore)]
+#[cfg(target_os = "linux")]
+#[test]
+fn test_recvmsg_so_mark() {
+    use nix::sys::socket::{
+        sockopt::{Mark, RcvMark},
+        *,
+    };
+    use std::io::{IoSlice, IoSliceMut};
+
+    require_capability!("test_recvmsg_so_mark", CAP_NET_ADMIN);
+    require_kernel_version!(test_recvmsg_so_mark, ">= 5.19");
+
+    const MARK: u32 = 0xdead_beef;
+    let message = [0u8; 64];
+
+    let in_socket = socket(
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )
+    .unwrap();
+    let out_socket = socket(
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )
+    .unwrap();
+
+    let localhost = SockaddrIn::from_str("127.0.0.1:0").unwrap();
+    bind(in_socket.as_raw_fd(), &localhost).unwrap();
+    let address: SockaddrIn = getsockname(in_socket.as_raw_fd()).unwrap();
+    connect(out_socket.as_raw_fd(), &address).unwrap();
+
+    // Ask the kernel to deliver `skb->mark` as a cmsg on every recv on
+    // `in_socket`, and stamp our chosen mark on outgoing packets from
+    // `out_socket`.
+    setsockopt(&in_socket, RcvMark, &true).unwrap();
+    setsockopt(&out_socket, Mark, &MARK).unwrap();
+
+    let iov = [IoSlice::new(&message)];
+    let sent = sendmsg::<SockaddrIn>(
+        out_socket.as_raw_fd(),
+        &iov,
+        &[],
+        MsgFlags::empty(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(message.len(), sent);
+
+    let mut buffer = vec![0u8; message.len()];
+    let mut cmsgspace = nix::cmsg_space!(u32);
+    let mut iov = [IoSliceMut::new(&mut buffer)];
+    let r = recvmsg::<()>(
+        in_socket.as_raw_fd(),
+        &mut iov,
+        Some(&mut cmsgspace),
+        MsgFlags::empty(),
+    )
+    .unwrap();
+
+    let mut received_mark = None;
+    for cmsg in r.cmsgs().unwrap() {
+        match cmsg {
+            ControlMessageOwned::SoMark(m) => received_mark = Some(m),
+            other => panic!("unexpected control message: {other:?}"),
+        }
+    }
+    assert_eq!(received_mark, Some(MARK));
 }
 
 #[cfg(any(linux_android, target_os = "freebsd"))]
@@ -3152,7 +3261,12 @@ fn can_use_cmsg_space() {
     let _ = cmsg_space!(u8);
 }
 
-#[cfg(not(any(linux_android, target_os = "redox", target_os = "haiku")))]
+#[cfg(not(any(
+    linux_android,
+    target_os = "redox",
+    target_os = "haiku",
+    target_os = "cygwin"
+)))]
 #[test]
 fn can_open_routing_socket() {
     use nix::sys::socket::{socket, AddressFamily, SockFlag, SockType};

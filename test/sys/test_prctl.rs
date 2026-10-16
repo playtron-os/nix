@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(linux_android)]
 #[cfg(feature = "process")]
 mod test_prctl {
     use std::ffi::CStr;
@@ -131,7 +131,12 @@ mod test_prctl {
         prctl::set_thp_disable(original).unwrap();
     }
 
+    // Ignore this test under QEMU, as it started failing after updating the Linux CI
+    // runner image, for reasons unknown.
+    //
+    // See: https://github.com/nix-rust/nix/issues/2418
     #[test]
+    #[cfg_attr(qemu, ignore)]
     fn test_set_vma_anon_name() {
         use nix::errno::Errno;
         use nix::sys::mman;

@@ -16,6 +16,7 @@ use crate::fcntl::AtFlags;
     target_os = "fuchsia",
     target_os = "hurd",
     target_os = "redox",
+    target_os = "cygwin",
 ))]
 use crate::fcntl::OFlag;
 #[cfg(all(feature = "fs", bsd))]
@@ -38,10 +39,20 @@ feature! {
     pub use self::pivot_root::*;
 }
 
-#[cfg(any(freebsdlike, linux_android, target_os = "openbsd"))]
+#[cfg(any(
+    freebsdlike,
+    linux_android,
+    target_os = "openbsd",
+    target_os = "redox"
+))]
 pub use self::setres::*;
 
-#[cfg(any(freebsdlike, linux_android, target_os = "openbsd"))]
+#[cfg(any(
+    freebsdlike,
+    linux_android,
+    target_os = "openbsd",
+    target_os = "redox"
+))]
 pub use self::getres::*;
 
 feature! {
@@ -352,7 +363,7 @@ feature! {
 /// Get the terminal foreground process group (see
 /// [tcgetpgrp(3)](https://pubs.opengroup.org/onlinepubs/9699919799/functions/tcgetpgrp.html)).
 ///
-/// Get the group process id (GPID) of the foreground process group on the
+/// Get the process group id (PGID) of the foreground process group on the
 /// terminal associated to file descriptor (FD).
 #[inline]
 pub fn tcgetpgrp<F: std::os::fd::AsFd>(fd: F) -> Result<Pid> {
@@ -362,9 +373,9 @@ pub fn tcgetpgrp<F: std::os::fd::AsFd>(fd: F) -> Result<Pid> {
     Errno::result(res).map(Pid)
 }
 /// Set the terminal foreground process group (see
-/// [tcgetpgrp(3)](https://pubs.opengroup.org/onlinepubs/9699919799/functions/tcsetpgrp.html)).
+/// [tcsetpgrp(3)](https://pubs.opengroup.org/onlinepubs/9699919799/functions/tcsetpgrp.html)).
 ///
-/// Get the group process id (PGID) to the foreground process group on the
+/// Set the process group id (PGID) to the foreground process group on the
 /// terminal associated to file descriptor (FD).
 #[inline]
 pub fn tcsetpgrp<F: std::os::fd::AsFd>(fd: F, pgrp: Pid) -> Result<()> {
@@ -401,6 +412,14 @@ pub fn getpgrp() -> Pid {
 #[inline]
 pub fn gettid() -> Pid {
     Pid(unsafe { libc::syscall(libc::SYS_gettid) as pid_t })
+}
+
+/// Get the caller's thread ID (see
+/// [pthread_getthreadid_np(3)](https://man.freebsd.org/cgi/man.cgi?query=pthread_getthreadid_np&sektion=3&manpath=FreeBSD+15.0-RELEASE+and+Ports).
+#[cfg(target_os = "freebsd")]
+#[inline]
+pub fn pthread_getthreadid_np() -> Pid {
+    Pid(unsafe { libc::pthread_getthreadid_np() as pid_t })
 }
 }
 
@@ -803,7 +822,6 @@ pub fn mkdir<P: ?Sized + NixPath>(path: &P, mode: crate::sys::stat::Mode) -> Res
 /// }
 /// ```
 #[inline]
-#[cfg(not(target_os = "redox"))] // RedoxFS does not support fifo yet
 pub fn mkfifo<P: ?Sized + NixPath>(path: &P, mode: crate::sys::stat::Mode) -> Result<()> {
     let res = path.with_nix_path(|cstr| unsafe {
         libc::mkfifo(cstr.as_ptr(), mode.bits() as libc::mode_t)
@@ -1403,9 +1421,9 @@ pub enum Whence {
     #[cfg(any(
         apple_targets,
         freebsdlike,
+        linux_android,
         solarish,
         target_os = "hurd",
-        target_os = "linux",
     ))]
     SeekData = libc::SEEK_DATA,
     /// Specify an offset relative to the next hole in the file greater than
@@ -1416,9 +1434,9 @@ pub enum Whence {
     #[cfg(any(
         apple_targets,
         freebsdlike,
+        linux_android,
         solarish,
         target_os = "hurd",
-        target_os = "linux",
     ))]
     SeekHole = libc::SEEK_HOLE,
 }
@@ -1494,6 +1512,7 @@ feature! {
     target_os = "hurd",
     target_os = "redox",
     netbsdlike,
+    target_os = "cygwin",
 ))]
 pub fn pipe2(flags: OFlag) -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     let mut fds = mem::MaybeUninit::<[std::os::fd::OwnedFd; 2]>::uninit();
@@ -1665,7 +1684,15 @@ pub fn chroot<P: ?Sized + NixPath>(path: &P) -> Result<()> {
 /// Commit filesystem caches to disk
 ///
 /// See also [sync(2)](https://pubs.opengroup.org/onlinepubs/9699919799/functions/sync.html)
-#[cfg(any(bsd, linux_android, solarish, target_os = "haiku", target_os = "aix", target_os = "hurd"))]
+#[cfg(any(
+    bsd,
+    linux_android,
+    solarish,
+    target_os = "haiku",
+    target_os = "aix",
+    target_os = "hurd",
+    target_os = "cygwin"
+))]
 pub fn sync() {
     unsafe { libc::sync() };
 }
@@ -1943,7 +1970,8 @@ pub fn setgroups(groups: &[Gid]) -> Result<()> {
     cfg_if! {
         if #[cfg(any(bsd,
                      solarish,
-                     target_os = "aix"))] {
+                     target_os = "aix",
+                     target_os = "cygwin"))] {
             type setgroups_ngroups_t = c_int;
         } else {
             type setgroups_ngroups_t = size_t;
@@ -2206,7 +2234,7 @@ feature! {
 #![feature = "acct"]
 
 /// Process accounting
-#[cfg(not(any(target_os = "redox", target_os = "haiku")))]
+#[cfg(not(any(target_os = "redox", target_os = "haiku", target_os = "cygwin")))]
 pub mod acct {
     use crate::errno::Errno;
     use crate::{NixPath, Result};
@@ -3207,7 +3235,12 @@ mod pivot_root {
     }
 }
 
-#[cfg(any(linux_android, freebsdlike, target_os = "openbsd"))]
+#[cfg(any(
+    linux_android,
+    freebsdlike,
+    target_os = "openbsd",
+    target_os = "redox"
+))]
 mod setres {
     feature! {
     #![feature = "user"]
@@ -3252,7 +3285,12 @@ mod setres {
     }
 }
 
-#[cfg(any(linux_android, freebsdlike, target_os = "openbsd"))]
+#[cfg(any(
+    linux_android,
+    freebsdlike,
+    target_os = "openbsd",
+    target_os = "redox"
+))]
 mod getres {
     feature! {
     #![feature = "user"]
@@ -3497,6 +3535,7 @@ pub struct User {
         target_os = "haiku",
         target_os = "hurd",
         target_os = "emscripten",
+        target_os = "cygwin",
     )))]
     pub class: CString,
     /// Last password change
@@ -3508,6 +3547,7 @@ pub struct User {
         target_os = "haiku",
         target_os = "hurd",
         target_os = "emscripten",
+        target_os = "cygwin",
     )))]
     pub change: libc::time_t,
     /// Expiration time of account
@@ -3519,6 +3559,7 @@ pub struct User {
         target_os = "haiku",
         target_os = "hurd",
         target_os = "emscripten",
+        target_os = "cygwin",
     )))]
     pub expire: libc::time_t,
 }
@@ -3573,6 +3614,7 @@ impl From<&libc::passwd> for User {
                     target_os = "haiku",
                     target_os = "hurd",
                     target_os = "emscripten",
+                    target_os = "cygwin",
                 )))]
                 class: CString::new(CStr::from_ptr(pw.pw_class).to_bytes())
                     .unwrap(),
@@ -3584,6 +3626,7 @@ impl From<&libc::passwd> for User {
                     target_os = "haiku",
                     target_os = "hurd",
                     target_os = "emscripten",
+                    target_os = "cygwin",
                 )))]
                 change: pw.pw_change,
                 #[cfg(not(any(
@@ -3594,6 +3637,7 @@ impl From<&libc::passwd> for User {
                     target_os = "haiku",
                     target_os = "hurd",
                     target_os = "emscripten",
+                    target_os = "cygwin",
                 )))]
                 expire: pw.pw_expire,
             }
@@ -3636,6 +3680,7 @@ impl From<User> for libc::passwd {
                 target_os = "haiku",
                 target_os = "hurd",
                 target_os = "emscripten",
+                target_os = "cygwin",
             )))]
             pw_class: u.class.into_raw(),
             #[cfg(not(any(
@@ -3646,6 +3691,7 @@ impl From<User> for libc::passwd {
                 target_os = "haiku",
                 target_os = "hurd",
                 target_os = "emscripten",
+                target_os = "cygwin",
             )))]
             pw_change: u.change,
             #[cfg(not(any(
@@ -3656,11 +3702,12 @@ impl From<User> for libc::passwd {
                 target_os = "haiku",
                 target_os = "hurd",
                 target_os = "emscripten",
+                target_os = "cygwin",
             )))]
             pw_expire: u.expire,
             #[cfg(solarish)]
             pw_age: CString::new("").unwrap().into_raw(),
-            #[cfg(solarish)]
+            #[cfg(any(solarish, target_os = "cygwin"))]
             pw_comment: CString::new("").unwrap().into_raw(),
             #[cfg(freebsdlike)]
             pw_fields: 0,

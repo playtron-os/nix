@@ -4,8 +4,10 @@ use nix::sys::socket::{
     getsockopt, setsockopt, socket, sockopt, AddressFamily, SockFlag,
     SockProtocol, SockType,
 };
-use rand::{thread_rng, Rng};
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd};
+use rand::{rng, Rng};
+use std::os::unix::io::AsRawFd;
+#[cfg(linux_android)]
+use std::os::unix::io::{FromRawFd, OwnedFd};
 
 // NB: FreeBSD supports LOCAL_PEERCRED for SOCK_SEQPACKET, but OSX does not.
 #[cfg(freebsdlike)]
@@ -124,7 +126,7 @@ fn test_so_buf() {
         SockProtocol::Udp,
     )
     .unwrap();
-    let bufsize: usize = thread_rng().gen_range(4096..131_072);
+    let bufsize: usize = rng().random_range(4096..131_072);
     setsockopt(&fd, sockopt::SndBuf, &bufsize).unwrap();
     let actual = getsockopt(&fd, sockopt::SndBuf).unwrap();
     assert!(actual >= bufsize);
@@ -159,11 +161,11 @@ fn test_so_listen_q_limit() {
 }
 
 #[test]
+#[cfg_attr(target_os = "cygwin", ignore)]
 fn test_so_tcp_maxseg() {
     use nix::sys::socket::{
         accept, bind, connect, getsockname, listen, Backlog, SockaddrIn,
     };
-    use nix::unistd::write;
     use std::net::SocketAddrV4;
     use std::str::FromStr;
 
@@ -183,14 +185,12 @@ fn test_so_tcp_maxseg() {
     let initial = getsockopt(&rsock, sockopt::TcpMaxSeg).unwrap();
     // Initial MSS is expected to be 536 (https://tools.ietf.org/html/rfc879#section-1) but some
     // platforms keep it even lower. This might fail if you've tuned your initial MSS to be larger
-    // than 700
+    // than `segsize`
+    let segsize: u32 = 873;
+    assert!(initial < segsize);
     cfg_if! {
         if #[cfg(linux_android)] {
-            let segsize: u32 = 873;
-            assert!(initial < segsize);
             setsockopt(&rsock, sockopt::TcpMaxSeg, &segsize).unwrap();
-        } else {
-            assert!(initial < 700);
         }
     }
 
@@ -202,20 +202,37 @@ fn test_so_tcp_maxseg() {
         SockProtocol::Tcp,
     )
     .unwrap();
+
     connect(ssock.as_raw_fd(), &sock_addr).unwrap();
-    let rsess = accept(rsock.as_raw_fd()).unwrap();
-    let rsess = unsafe { OwnedFd::from_raw_fd(rsess) };
-    write(&rsess, b"hello").unwrap();
-    let actual = getsockopt(&ssock, sockopt::TcpMaxSeg).unwrap();
-    // Actual max segment size takes header lengths into account, max IPv4 options (60 bytes) + max
-    // TCP options (40 bytes) are subtracted from the requested maximum as a lower boundary.
+
+    let rsess = accept(&rsock).unwrap();
+
     cfg_if! {
-        if #[cfg(linux_android)] {
-            assert!((segsize - 100) <= actual);
-            assert!(actual <= segsize);
+        if #[cfg(apple_targets)] {
+            // on apple targets (and unlike linux), we can only set the MSS on a *connected*
+            // socket. Also, the same MSS can't be read using getsockopt from the other end.
+
+            assert_ne!(segsize, getsockopt(&rsess, sockopt::TcpMaxSeg).unwrap());
+            setsockopt(&rsess, sockopt::TcpMaxSeg, &segsize).unwrap();
+            assert_eq!(segsize, getsockopt(&rsess, sockopt::TcpMaxSeg).unwrap());
+
+            assert_ne!(segsize, getsockopt(&ssock, sockopt::TcpMaxSeg).unwrap());
+            setsockopt(&ssock, sockopt::TcpMaxSeg, &segsize).unwrap();
+            assert_eq!(segsize, getsockopt(&ssock, sockopt::TcpMaxSeg).unwrap());
         } else {
-            assert!(initial < actual);
-            assert!(536 < actual);
+            use nix::unistd::write;
+
+            write(&rsess, b"hello").unwrap();
+            let actual = getsockopt(&ssock, sockopt::TcpMaxSeg).unwrap();
+            // Actual max segment size takes header lengths into account, max IPv4 options (60 bytes) + max
+            // TCP options (40 bytes) are subtracted from the requested maximum as a lower boundary.
+            if cfg!(linux_android) {
+                assert!((segsize - 100) <= actual);
+                assert!(actual <= segsize);
+            } else {
+                assert!(initial < actual);
+                assert!(536 < actual);
+            }
         }
     }
 }
@@ -241,6 +258,8 @@ fn test_so_type_unknown() {
     use nix::errno::Errno;
 
     require_capability!("test_so_type", CAP_NET_RAW);
+    // SOCK_PACKET is deprecated, but since it is used for testing here, we allow it
+    #[allow(deprecated)]
     let raw_fd = unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_PACKET, 0) };
     assert!(raw_fd >= 0, "Error opening socket: {}", nix::Error::last());
     let sockfd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
@@ -271,11 +290,7 @@ fn test_tcp_congestion() {
     let val = getsockopt(&fd, sockopt::TcpCongestion).unwrap();
     let bytes = val.as_os_str().as_bytes();
     for b in bytes.iter() {
-        assert_ne!(
-            *b, 0,
-            "OsString should contain no embedded NULs: {:?}",
-            val
-        );
+        assert_ne!(*b, 0, "OsString should contain no embedded NULs: {val:?}");
     }
     setsockopt(&fd, sockopt::TcpCongestion, &val).unwrap();
 
@@ -487,7 +502,7 @@ fn test_dontfrag_opts() {
 }
 
 #[test]
-#[cfg(any(linux_android, apple_targets))]
+#[cfg(any(all(linux_android, not(target_env = "uclibc")), apple_targets))]
 // Disable the test under emulation because it fails in Cirrus-CI.  Lack
 // of QEMU support is suspected.
 #[cfg_attr(qemu, ignore)]
@@ -682,7 +697,7 @@ fn test_ts_clock_monotonic() {
 }
 
 #[test]
-#[cfg(linux_android)]
+#[cfg(all(linux_android, not(target_env = "uclibc")))]
 // Disable the test under emulation because it fails with ENOPROTOOPT in CI
 // on cross target. Lack of QEMU support is suspected.
 #[cfg_attr(qemu, ignore)]
@@ -748,6 +763,46 @@ fn can_get_peercred_on_unix_socket() {
     let b_cred = getsockopt(&b, sockopt::PeerCredentials).unwrap();
     assert_eq!(a_cred, b_cred);
     assert_ne!(a_cred.pid(), 0);
+}
+
+#[cfg(target_os = "linux")]
+fn pid_from_pidfd(pidfd: OwnedFd) -> u32 {
+    use std::fs::read_to_string;
+
+    let fd = pidfd.as_raw_fd();
+    let fdinfo = read_to_string(format!("/proc/self/fdinfo/{fd}")).unwrap();
+    let pidline = fdinfo.split('\n').find(|s| s.starts_with("Pid:")).unwrap();
+    pidline.split('\t').next_back().unwrap().parse().unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn can_get_peerpidfd_on_unix_socket() {
+    use nix::sys::socket::{socketpair, sockopt, SockFlag, SockType};
+
+    let (a, b) = socketpair(
+        AddressFamily::Unix,
+        SockType::Stream,
+        None,
+        SockFlag::empty(),
+    )
+    .unwrap();
+
+    match (
+        getsockopt(&a, sockopt::PeerPidfd),
+        getsockopt(&b, sockopt::PeerPidfd),
+    ) {
+        (Ok(a_pidfd), Ok(b_pidfd)) => {
+            let a_pid = pid_from_pidfd(a_pidfd);
+            let b_pid = pid_from_pidfd(b_pidfd);
+            assert_eq!(a_pid, b_pid);
+            assert_ne!(a_pid, 0);
+        }
+        (Err(nix::Error::ENOPROTOOPT), Err(nix::Error::ENOPROTOOPT)) => {
+            // Pidfd can still be unsupported on some CI runners
+        }
+        (Err(err), _) | (_, Err(err)) => panic!("{err:?}"),
+    };
 }
 
 #[test]
@@ -849,7 +904,7 @@ fn test_ktls() {
     .unwrap();
     connect(ssock.as_raw_fd(), &sock_addr).unwrap();
 
-    let _rsess = accept(rsock.as_raw_fd()).unwrap();
+    let _rsess = accept(&rsock).unwrap();
 
     match setsockopt(&ssock, sockopt::TcpUlp::default(), b"tls") {
         Ok(()) => (),
@@ -897,7 +952,7 @@ fn test_ktls() {
 }
 
 #[test]
-#[cfg(apple_targets)]
+#[cfg(target_os = "macos")]
 fn test_utun_ifname() {
     skip_if_not_root!("test_utun_ifname");
 
@@ -1167,4 +1222,70 @@ fn test_exclbind() {
         bind(fd2.as_raw_fd(), &SockaddrIn::from(addr)),
         Err(Errno::EADDRINUSE)
     );
+}
+
+#[cfg(target_os = "illumos")]
+#[test]
+fn test_solfilter() {
+    use nix::errno::Errno;
+    let s = socket(
+        AddressFamily::Inet,
+        SockType::Stream,
+        SockFlag::empty(),
+        SockProtocol::Tcp,
+    )
+    .unwrap();
+    let data = std::ffi::OsStr::new("httpf");
+    let attach = sockopt::FilterAttach;
+    let detach = sockopt::FilterDetach;
+
+    // These 2 options won't work unless the needed kernel module is installed:
+    // https://github.com/nix-rust/nix/pull/2611#issuecomment-2750237782
+    //
+    // So we only test the binding here
+    assert_eq!(Err(Errno::ENOENT), setsockopt(&s, attach, data));
+    assert_eq!(Err(Errno::ENOENT), setsockopt(&s, detach, data));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+pub fn test_so_attach_reuseport_cbpf() {
+    let fd = socket(
+        AddressFamily::Inet6,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )
+    .unwrap();
+    setsockopt(&fd, sockopt::ReusePort, &true).unwrap();
+    setsockopt(&fd, sockopt::ReuseAddr, &true).unwrap();
+    let mut flt: [libc::sock_filter; 2] = unsafe { std::mem::zeroed() };
+    flt[0].code = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+    flt[0].k = (libc::SKF_AD_OFF + libc::SKF_AD_CPU) as u32;
+    flt[1].code = (libc::BPF_RET | 0x10) as u16;
+    let fp = libc::sock_fprog {
+        len: flt.len() as u16,
+        filter: flt.as_mut_ptr(),
+    };
+    setsockopt(&fd, sockopt::AttachReusePortCbpf, &fp).unwrap_or_else(|e| {
+        assert_eq!(e, nix::errno::Errno::ENOPROTOOPT);
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_tcp_cork() {
+    let fd = socket(
+        AddressFamily::Inet,
+        SockType::Stream,
+        SockFlag::empty(),
+        SockProtocol::Tcp,
+    )
+    .unwrap();
+
+    setsockopt(&fd, sockopt::TcpCork, &true).unwrap();
+    assert!(getsockopt(&fd, sockopt::TcpCork).unwrap());
+
+    setsockopt(&fd, sockopt::TcpCork, &false).unwrap();
+    assert!(!getsockopt(&fd, sockopt::TcpCork).unwrap());
 }

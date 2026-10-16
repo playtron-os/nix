@@ -1,6 +1,5 @@
 # Rust bindings to *nix APIs
 
-[![Cirrus Build Status](https://api.cirrus-ci.com/github/nix-rust/nix.svg)](https://cirrus-ci.com/github/nix-rust/nix)
 [![crates.io](https://img.shields.io/crates/v/nix.svg)](https://crates.io/crates/nix)
 [![docs.rs](https://img.shields.io/badge/docs.rs-nix-blue?style=flat-square&logo=docs.rs)](https://docs.rs/nix)
 ![maintenance-status](https://img.shields.io/badge/maintenance-actively--developed-brightgreen.svg)
@@ -97,7 +96,7 @@ The following targets are supported by `nix`:
    <td>
     <li>armv7-unknown-linux-uclibceabihf</li>
     <li>powerpc64-unknown-linux-gnu</li>
-    <li>x86_64-fuchsia</li>
+    <li>x86_64-unknown-fuchsia</li>
     <li>x86_64-unknown-dragonfly</li>
     <li>x86_64-unknown-haiku</li>
     <li>x86_64-unknown-linux-gnux32</li>
@@ -118,7 +117,7 @@ changed in the future without bumping the major or minor version.
 Contributions are very welcome.  Please See [CONTRIBUTING](CONTRIBUTING.md) for
 additional details.
 
-Feel free to join us in [the nix-rust/nix](https://gitter.im/nix-rust/nix) channel on Gitter to
+Feel free to join us in [the nix-rust/nix](https://discord.com/invite/rkBeJUsmyd) channel on Discord to
 discuss `nix` development.
 
 ## License
